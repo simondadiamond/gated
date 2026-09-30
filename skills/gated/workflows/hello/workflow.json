@@ -1,0 +1,20 @@
+{
+  "name": "hello",
+  "description": "A one-minute tour: one checkpoint, one file gate. Try this first.",
+  "checkpoints": [
+    {
+      "id": "greet",
+      "title": "Write a greeting",
+      "step": "steps/greet.md",
+      "gates": [
+        {
+          "id": "greeting",
+          "type": "file",
+          "path": "{{run}}/hello.md",
+          "headings": ["Hello", "Today"],
+          "contains": ["\\d{4}-\\d{2}-\\d{2}"]
+        }
+      ]
+    }
+  ]
+}

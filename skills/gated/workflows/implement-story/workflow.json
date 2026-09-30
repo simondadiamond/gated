@@ -1,0 +1,111 @@
+{
+  "name": "implement-story",
+  "description": "Take a story from ticket to a reviewed pull request: acceptance criteria first, then a plan, then tested checkpoints.",
+  "inputs": {
+    "story": {
+      "required": true,
+      "description": "an issue number, an issue URL, or a sentence describing the change"
+    },
+    "test": {
+      "required": true,
+      "description": "the command that runs the project's tests, e.g. \"npm test\""
+    },
+    "base": {
+      "default": "main",
+      "description": "the branch the pull request targets"
+    }
+  },
+  "attempts": 5,
+  "commit": true,
+  "before": [
+    {
+      "id": "acceptance-criteria",
+      "title": "Acceptance criteria",
+      "step": "steps/acceptance-criteria.md",
+      "gates": [
+        {
+          "id": "criteria-doc",
+          "type": "file",
+          "path": "{{run}}/acceptance.md",
+          "headings": [
+            "Acceptance criteria",
+            "Out of scope"
+          ]
+        },
+        {
+          "id": "criteria-shape",
+          "type": "command",
+          "run": "python3 \"{{workflow}}/checks/criteria.py\" \"{{run}}/acceptance.md\""
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "step": "steps/plan.md"
+  },
+  "every": [
+    {
+      "id": "suite",
+      "type": "command",
+      "run": "{{input.test}}",
+      "timeout": 1800
+    }
+  ],
+  "checkpoints": [
+    {
+      "id": "review",
+      "title": "Adversarial review",
+      "step": "steps/review.md",
+      "gates": [
+        {
+          "id": "criteria-covered",
+          "type": "command",
+          "run": "python3 \"{{workflow}}/checks/criteria-covered.py\" \"{{run}}\""
+        },
+        {
+          "id": "adversarial",
+          "type": "judge",
+          "rubric": "rubrics/review.md",
+          "inputs": [
+            {
+              "run": "git diff {{input.base}}...HEAD"
+            },
+            {
+              "run": "git log --format='%h %s' {{input.base}}..HEAD"
+            },
+            {
+              "file": "{{run}}/acceptance.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pull-request",
+      "title": "Open the pull request",
+      "step": "steps/pull-request.md",
+      "gates": [
+        {
+          "id": "clean",
+          "type": "command",
+          "run": "test -z \"$(git status --porcelain)\""
+        },
+        {
+          "id": "pushed",
+          "type": "command",
+          "run": "git rev-parse @{u} >/dev/null && test \"$(git rev-parse @)\" = \"$(git rev-parse @{u})\""
+        },
+        {
+          "id": "pr-open",
+          "type": "command",
+          "run": "test \"$(gh pr view --json state -q .state)\" = OPEN"
+        },
+        {
+          "id": "try-it",
+          "type": "human",
+          "ask": "try the change yourself, then type approve (or tell me what's wrong)"
+        }
+      ]
+    }
+  ]
+}

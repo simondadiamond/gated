@@ -1,0 +1,22 @@
+{
+  "name": "gated",
+  "owner": {
+    "name": "Simon Paris",
+    "url": "https://simonparis.ca"
+  },
+  "description": "gated, as an installable Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "gated",
+      "source": "./",
+      "description": "Run a workflow as checkpoints whose gates are checked by code, not by the agent.",
+      "category": "engineering",
+      "keywords": [
+        "gates",
+        "hooks",
+        "reliability",
+        "workflows"
+      ]
+    }
+  ]
+}

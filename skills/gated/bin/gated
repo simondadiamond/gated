@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""gated: run workflows as checkpoints with gates that code checks. See ../SKILL.md."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+
+from gated_lib.cli import main  # noqa: E402
+
+sys.exit(main())

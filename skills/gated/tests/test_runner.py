@@ -1,0 +1,669 @@
+import json
+import subprocess
+
+from helpers import GatedCase
+
+from gated_lib import runner
+
+
+class FixedRunTest(GatedCase):
+    def test_start_validates_inputs(self):
+        self.workflow("demo", {"inputs": {"repo": {"required": True, "description": "owner/name"}, "days": {"default": 7}},
+                               "checkpoints": [{"id": "one", "step": "one.md", "gates": []}]}, {"one.md": "x"})
+        code, _, err = self.gated("start", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("repo=...  owner/name", err)
+        code, _, err = self.gated("start", "demo", "nope=1")
+        self.assertIn("unknown input 'nope'", err)
+        run = self.start("demo", "repo=a/b")
+        self.assertEqual(run.state["inputs"], {"repo": "a/b", "days": "7"})
+
+    def test_checkpoints_advance_then_finish(self):
+        self.workflow("demo", {"checkpoints": [
+            {"id": "one", "step": "s.md", "gates": [{"id": "a", "type": "file", "path": "a.txt"}]},
+            {"id": "two", "step": "s.md", "gates": [{"id": "b", "type": "file", "path": "b.txt"}]}]}, {"s.md": "x"})
+        run = self.start()
+        may_stop, msg = runner.check(run)
+        self.assertFalse(may_stop)
+        self.assertIn("a (file)", msg)
+        self.assertIn("todos (todos)", msg)
+        self.todos_done(run)
+        (self.project / "a.txt").write_text("a")
+        may_stop, msg = runner.check(run)
+        self.assertFalse(may_stop)
+        self.assertIn("Start checkpoint 'two'", msg)
+        self.todos_done(run, "two")
+        (self.project / "b.txt").write_text("b")
+        may_stop, msg = runner.check(run)
+        self.assertTrue(may_stop)
+        self.assertEqual(run.status, "done")
+        self.assertIn("### one [one]: done", (run.dir / "report.md").read_text())
+
+    def test_check_without_counting_never_uses_attempts(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        run = self.start()
+        for _ in range(10):
+            runner.check(run)
+        self.assertEqual(run.state["attempts"], {})
+        self.assertEqual(run.status, "running")
+
+    def test_budget_blocks_without_skipping(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}], attempts=3)
+        run = self.start()
+        self.todos_done(run)
+        for n in range(2):
+            may_stop, msg = runner.check(run, count_attempts=True)
+            self.assertFalse(may_stop)
+            self.assertIn(f"t {n + 1}/3", msg)
+        may_stop, msg = runner.check(run, count_attempts=True)
+        self.assertTrue(may_stop)
+        self.assertEqual(run.status, "blocked")
+        self.assertIn("No gate was skipped", msg)
+        report = (run.dir / "report.md").read_text()
+        self.assertIn("one/t", report)
+        self.assertEqual(run.current()["status"], "active")
+
+    def test_per_gate_budget_overrides_workflow(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false", "attempts": 1}])
+        run = self.start()
+        self.todos_done(run)
+        runner.check(run, count_attempts=True)
+        self.assertEqual(run.status, "blocked")
+
+    def test_resume_after_blocked_gets_fresh_attempts(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "test -f fixed"}], attempts=1)
+        run = self.start()
+        self.todos_done(run)
+        runner.check(run, count_attempts=True)
+        self.assertEqual(run.status, "blocked")
+        code, out, _ = self.gated("resume", "--run", run.id)
+        self.assertIn("ask them to type `approve`", out)
+        token = next(line for line in out.splitlines() if line.startswith("gated-claim:"))
+        self.hook("posttool", {"session_id": "s2", "tool_response": token})
+        run = self.run_obj()
+        self.assertEqual(run.status, "blocked", "the agent alone must not get fresh attempts")
+        self.hook("prompt", {"session_id": "s2", "prompt": "approve"})
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.state["owner"], "s2")
+        self.assertEqual(run.state["attempts"], {})
+
+    def test_tampered_definition_fails_every_check(self):
+        wdir = self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
+        run = self.start()
+        self.todos_done(run)
+        data = json.loads((wdir / "workflow.json").read_text())
+        data["checkpoints"][0]["gates"] = []
+        (wdir / "workflow.json").write_text(json.dumps(data))
+        may_stop, msg = runner.check(run)
+        self.assertFalse(may_stop)
+        self.assertIn("locked files changed", msg)
+
+    def test_commit_per_checkpoint(self):
+        self.git_init()
+        self.simple_workflow([{"id": "t", "type": "file", "path": "feature.txt"}], commit=True)
+        run = self.start()
+        self.todos_done(run)
+        (self.project / "feature.txt").write_text("x")
+        may_stop, msg = runner.check(run)
+        self.assertIn("committed", msg)
+        log = subprocess.run(["git", "log", "--format=%s", "-1"], cwd=str(self.project), capture_output=True, text=True).stdout
+        self.assertIn("gated(demo-1)", log)
+        files = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"], cwd=str(self.project), capture_output=True, text=True).stdout
+        self.assertNotIn(".gated", files)
+
+    def test_step_brief_lists_gates_and_learnings(self):
+        wdir = self.simple_workflow([{"id": "t", "type": "command", "run": "npm test"}])
+        (wdir / "learnings.md").write_text("- use pnpm, not npm")
+        self.start()
+        code, out, _ = self.gated("step")
+        self.assertIn("Do the thing in", out)
+        self.assertIn("`npm test` must exit 0", out)
+        self.assertIn("todo.md as `- [ ] item`", out)
+        self.assertIn("use pnpm, not npm", out)
+
+
+class PlannedRunTest(GatedCase):
+    def setUp(self):
+        super().setUp()
+        self.workflow("story", {"plan": {"step": "plan.md"},
+                                "every": [{"id": "suite", "type": "command", "run": "true"}],
+                                "checkpoints": [{"id": "review", "step": "review.md", "gates": [
+                                    {"id": "ok", "type": "human", "ask": "try it"}]}]},
+                      {"plan.md": "Plan it.", "review.md": "Review it."})
+
+    def write_plan(self, run, cps):
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": cps}))
+
+    def test_plan_then_approval_then_run(self):
+        run = self.start("story")
+        self.assertEqual(run.status, "planning")
+        may_stop, msg = runner.check(run)
+        self.assertFalse(may_stop)
+        self.assertIn("Planning isn't finished", msg)
+        self.write_plan(run, [{"id": "skeleton", "title": "Skeleton", "instructions": "Build it",
+                               "gates": [{"id": "f", "type": "file", "path": "skeleton.txt"}]}])
+        code, out, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+        self.assertIn("1. Skeleton  [skeleton]", out)
+        self.assertIn("suite (command)", out)
+        self.assertIn("2. review", out)
+        run = self.run_obj()
+        self.assertEqual(run.status, "awaiting-approval")
+        self.assertTrue(runner.check(run)[0])
+        self.hook("prompt", {"session_id": "s1", "prompt": "looks good?"})
+        self.assertEqual(self.run_obj().status, "awaiting-approval")
+        self.hook("prompt", {"session_id": "s1", "prompt": "go ahead and change step 2 to use a table"})
+        self.assertEqual(self.run_obj().status, "awaiting-approval", "feedback that starts like approval isn't approval")
+        code, out, _ = self.hook("prompt", {"session_id": "s1", "prompt": "Approve."})
+        self.assertIn("approved the plan", out)
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.current()["id"], "skeleton")
+        self.assertEqual(run.current()["instructions"], "Build it")
+
+    def test_changes_requested_then_resubmitted(self):
+        run = self.start("story")
+        self.write_plan(run, [{"id": "a", "instructions": "first try", "gates": []}])
+        self.submit_plan()
+        self.hook("prompt", {"session_id": "s1", "prompt": "split a into two please"})
+        run = self.run_obj()
+        self.write_plan(run, [{"id": "a1", "instructions": "half", "gates": []},
+                              {"id": "a2", "instructions": "other half", "gates": []}])
+        code, out, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+        self.assertIn("2. a2", out)
+        run = self.run_obj()
+        self.assertTrue(run.state["plan"].endswith("plan-2.json"))
+        self.hook("prompt", {"session_id": "s1", "prompt": "approve"})
+        self.assertEqual(self.run_obj().current()["id"], "a1")
+
+    def test_planner_questions_reach_the_person(self):
+        run = self.start("story")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [], "questions": ["the suite fails on main"]}))
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 1)
+        self.assertIn("the suite fails on main", err)
+        (run.dir / "checkpoints.json").write_text(json.dumps({"questions": ["which table?"],
+            "checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        code, out, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+        self.assertIn("- which table?", out)
+
+    def test_bad_plan_is_rejected_with_reasons(self):
+        run = self.start("story")
+        self.write_plan(run, [{"id": "Bad Id", "gates": [{"id": "x", "type": "nope"}]}])
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 1)
+        self.assertIn("lowercase letters", err)
+        self.assertIn("needs 'instructions'", err)
+        self.write_plan(run, [{"id": "review", "instructions": "x", "gates": []}])
+        code, _, err = self.submit_plan()
+        self.assertIn("already used", err)
+
+    def test_human_gate_waits_then_approval_finishes(self):
+        run = self.start("story")
+        self.write_plan(run, [{"id": "a", "instructions": "x", "gates": []}])
+        self.submit_plan()
+        self.hook("prompt", {"session_id": "s1", "prompt": "approve"})
+        run = self.run_obj()
+        self.todos_done(run, "a")
+        runner.check(run)
+        self.todos_done(run, "review")
+        may_stop, msg = runner.check(run)
+        self.assertTrue(may_stop)
+        self.assertEqual(run.status, "waiting")
+        self.assertIn("try it", msg)
+        code, out, _ = self.hook("prompt", {"session_id": "s1", "prompt": "lgtm"})
+        self.assertIn("approved 'review'", out)
+        self.assertEqual(self.run_obj().status, "running")
+        code, _, err = self.hook("stop", {"session_id": "s1"})
+        self.assertIn("The run is done", err)
+        self.assertEqual(self.run_obj().status, "done")
+
+    def test_amend_after_done_needs_approval(self):
+        run = self.start("story")
+        self.write_plan(run, [{"id": "a", "instructions": "x", "gates": []}])
+        self.submit_plan()
+        self.hook("prompt", {"session_id": "s1", "prompt": "approve"})
+        run = self.run_obj()
+        for cp in ("a", "review"):
+            self.todos_done(run, cp)
+            runner.check(run)
+        self.hook("prompt", {"session_id": "s1", "prompt": "approve"})
+        self.hook("stop", {"session_id": "s1"})
+        self.assertEqual(self.run_obj().status, "done")
+        change = self.tmp / "change.json"
+        change.write_text(json.dumps({"checkpoints": [{"id": "fix-copy", "instructions": "fix the copy", "gates": []}]}))
+        code, out, err = self.gated("amend", str(change), "--run", run.id)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.run_obj().status, "awaiting-approval")
+        self.hook("prompt", {"session_id": "s1", "prompt": "approve"})
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.current()["id"], "fix-copy")
+
+
+class ShippedExamplesTest(GatedCase):
+    def test_every_example_lints(self):
+        from helpers import ROOT
+        for wdir in sorted((ROOT / "workflows").iterdir()):
+            code, out, err = self.gated("lint", str(wdir))
+            self.assertEqual(code, 0, out + err)
+
+    def test_hello_runs_end_to_end(self):
+        self.use_example("hello")
+        run = self.start("hello")
+        self.todos_done(run, "greet")
+        (run.dir / "hello.md").write_text("# Hello\ngated checks work.\n## Today\n2026-09-24\n")
+        may_stop, msg = runner.check(run)
+        self.assertTrue(may_stop, msg)
+        self.assertEqual(run.status, "done")
+
+    def test_weekly_report_checks_catch_a_missing_pr(self):
+        self.use_example("weekly-report")
+        run = self.start("weekly-report", "repo=a/b")
+        prs = [{"number": 1, "title": "One", "url": "https://github.com/a/b/pull/1", "mergedAt": "x"},
+               {"number": 2, "title": "Two", "url": "https://github.com/a/b/pull/2", "mergedAt": "x"}]
+        (run.dir / "prs.json").write_text(json.dumps(prs))
+        self.todos_done(run, "gather")
+        runner.check(run)
+        self.assertEqual(run.current()["id"], "write")
+        (run.dir / "report-7d.md").write_text("# Summary\nx\n## Merged\n- #1 https://github.com/a/b/pull/1\n## Risks\nNone\n")
+        from gated_lib import gates as G
+        complete = next(g for g in run.current()["gates"] if g["id"] == "complete")
+        r = G.evaluate(run, run.current(), complete)
+        self.assertFalse(r["ok"])
+        self.assertIn("#2", r["log"])
+
+
+class ReviewFindingsTest(GatedCase):
+    """One test per finding from the independent review of the first version."""
+
+    def test_agent_check_is_advisory(self):
+        self.simple_workflow([{"id": "f", "type": "file", "path": "a.txt"}])
+        run = self.start()
+        self.todos_done(run)
+        (self.project / "a.txt").write_text("a")
+        code, out, _ = self.gated("check")
+        self.assertEqual(code, 0)
+        self.assertIn("Only the hook can advance", out)
+        run = self.run_obj()
+        self.assertEqual((run.status, run.current()["status"]), ("running", "active"))
+
+    def test_env_cannot_fake_a_judge_from_the_agent_shell(self):
+        import os
+        gate = {"id": "review", "type": "judge", "rubric": "rubric.md"}
+        self.workflow("demo", {"checkpoints": [{"id": "one", "step": "one.md", "gates": [gate]}]}, {"one.md": "x", "rubric.md": "strict"})
+        run = self.start()
+        self.todos_done(run)
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: PASS'"
+        self.gated("check")
+        run = self.run_obj()
+        self.assertEqual(run.state.get("judgeCache", {}), {})
+        self.assertEqual(run.status, "running")
+
+    def test_stray_run_file_does_not_disable_hooks(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        self.start(session="owner")
+        stray = self.project / ".gated" / "runs" / "zz"
+        stray.mkdir()
+        (stray / "state.json").write_text("[]")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, err)
+
+    def test_state_edit_outside_gated_blocks_the_run(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        run = self.start(session="owner")
+        state = json.loads((run.dir / "state.json").read_text())
+        state["status"] = "done"
+        (run.dir / "state.json").write_text(json.dumps(state))
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, "a hand-written 'done' must not let the agent stop")
+        self.assertIn("changed outside gated", err)
+        self.assertEqual(self.run_obj().status, "blocked")
+
+    def test_tampered_running_state_blocks(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        run = self.start(session="owner")
+        state = json.loads((run.dir / "state.json").read_text())
+        state["attempts"] = {}
+        state["checkpoints"][0]["gates"] = []
+        (run.dir / "state.json").write_text(json.dumps(state))
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertIn("changed outside gated", err)
+        self.assertEqual(self.run_obj().status, "blocked")
+
+    def test_shell_write_from_inside_the_run_folder_denied(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
+        run = self.start(session="owner")
+        cmd = f"cd {run.dir} && sed -i '' s/running/done/ state.json"
+        code, _, _ = self.hook("pretool", {"session_id": "owner", "tool_name": "Bash", "tool_input": {"command": cmd}})
+        self.assertEqual(code, 2)
+        sneaky = "python3 bin/gated status; echo x > .gated/runs/demo-1/state.json"
+        code, _, _ = self.hook("pretool", {"session_id": "owner", "tool_name": "Bash", "tool_input": {"command": sneaky}})
+        self.assertEqual(code, 2)
+
+    def test_check_scripts_are_locked(self):
+        self.workflow("demo", {"checkpoints": [{"id": "one", "step": "s.md", "gates": [
+            {"id": "t", "type": "command", "run": "sh {{workflow}}/checks/c.sh"}]}]}, {"s.md": "x", "checks/c.sh": "exit 1"})
+        run = self.start()
+        self.assertTrue(any(k.endswith("checks/c.sh") for k in run.state["locks"]))
+
+    def test_red_refuses_a_command_that_did_not_run(self):
+        self.simple_workflow([{"id": "tests", "type": "red-first", "run": "no-such-runner", "lock": ["t_*.sh"]}])
+        self.start()
+        (self.project / "t_a.sh").write_text("x")
+        code, _, err = self.gated("red", "tests")
+        self.assertEqual(code, 1)
+        self.assertIn("didn't run (exit 127)", err)
+
+    def test_planner_questions_let_the_turn_end(self):
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [], "questions": ["which db?"]}))
+        code, out, _ = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 0)
+        self.assertIn("which db?", out)
+
+    def test_planning_has_a_budget(self):
+        self.workflow("story", {"plan": {"step": "p.md"}, "attempts": 2}, {"p.md": "x"})
+        self.start("story", session="owner")
+        codes = [self.hook("stop", {"session_id": "owner"})[0] for _ in range(3)]
+        self.assertEqual(codes, [2, 2, 0])
+        self.assertEqual(self.run_obj().status, "blocked")
+
+    def test_person_can_cancel_and_reject(self):
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        self.submit_plan()
+        self.hook("prompt", {"session_id": "owner", "prompt": "approve"})
+        run = self.run_obj()
+        self.todos_done(run, "a")
+        self.hook("stop", {"session_id": "owner"})
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")
+        change = self.tmp / "c.json"
+        change.write_text(json.dumps({"checkpoints": [{"id": "b", "instructions": "x", "gates": []}]}))
+        self.gated("amend", str(change), "--run", run.id)
+        self.hook("prompt", {"session_id": "owner", "prompt": "reject, not needed"})
+        run = self.run_obj()
+        self.assertEqual((run.status, len(run.state["checkpoints"])), ("done", 1))
+        self.hook("prompt", {"session_id": "owner", "prompt": "cancel"})
+        self.assertEqual(self.run_obj().status, "done", "plain 'cancel' is not 'cancel run'")
+
+    def test_cancel_run_ends_an_active_run(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        self.start(session="owner")
+        self.hook("prompt", {"session_id": "owner", "prompt": "cancel run"})
+        self.assertEqual(self.run_obj().status, "cancelled")
+        self.assertEqual(self.hook("stop", {"session_id": "owner"})[0], 0)
+
+    def test_amend_is_not_an_exit_from_a_failing_checkpoint(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        run = self.start(session="owner")
+        change = self.tmp / "c.json"
+        change.write_text(json.dumps({"checkpoints": [{"id": "b", "instructions": "x", "gates": []}]}))
+        code, _, err = self.gated("amend", str(change))
+        self.assertEqual(code, 1)
+        self.assertIn("finish the current checkpoint first", err)
+
+    def test_waiting_does_not_rerun_gates(self):
+        counter = self.tmp / "runs"
+        self.simple_workflow([{"id": "t", "type": "command", "run": f"echo x >> {counter}"},
+                              {"id": "ok", "type": "human", "ask": "look"}])
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "waiting")
+        for _ in range(3):
+            self.assertEqual(self.hook("stop", {"session_id": "owner"})[0], 0)
+        self.assertEqual(counter.read_text().count("x"), 1)
+
+    def test_every_id_collision_is_a_lint_error(self):
+        self.workflow("demo", {"every": [{"id": "suite", "type": "command", "run": "true"}],
+                               "checkpoints": [{"id": "one", "step": "s.md", "gates": [{"id": "suite", "type": "command", "run": "true"}]}]},
+                      {"s.md": "x"})
+        code, out, _ = self.gated("lint", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("reuses an id from 'every'", out)
+
+    def test_hooks_find_the_run_from_any_directory(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        self.start(session="owner")
+        code, _, _ = self.hook("stop", {"session_id": "owner", "cwd": "/"})
+        self.assertEqual(code, 2)
+
+
+class FindingsTest(GatedCase):
+    def test_hook_records_each_finding_once_and_report_lists_them(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        run = self.start(session="owner")
+        path = run.dir / "one" / "findings.md"
+        path.write_text("- src/a.py:10 swallows errors, out of scope\nnot a finding line\n")
+        self.hook("stop", {"session_id": "owner"})
+        path.write_text("- src/a.py:10 swallows errors, out of scope\n- README install step is stale\n")
+        self.hook("stop", {"session_id": "owner"})
+        run = self.run_obj()
+        self.assertEqual([f["text"] for f in run.state["findings"]],
+                         ["src/a.py:10 swallows errors, out of scope", "README install step is stale"])
+        code, out, _ = self.gated("report")
+        self.assertIn("## Found, not fixed", out)
+        self.assertIn("[one] README install step is stale", out)
+
+    def test_agent_check_does_not_record_findings(self):
+        self.simple_workflow([])
+        run = self.start()
+        (run.dir / "one" / "findings.md").write_text("- something\n")
+        self.gated("check")
+        self.assertEqual(self.run_obj().state.get("findings", []), [])
+
+    def test_findings_across_runs_with_since(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        for n, session in enumerate(("a", "b")):
+            run = self.start(session=session)
+            (run.dir / "one" / "findings.md").write_text(f"- finding {n}\n")
+            self.hook("stop", {"session_id": session})
+        old = self.run_obj()
+        old.state["findings"][0]["at"] = "2020-01-01T00:00:00Z"
+        old.save()
+        code, out, _ = self.gated("findings")
+        self.assertIn("demo:", out)
+        self.assertIn("finding 0", out)
+        self.assertIn("finding 1", out)
+        code, out, _ = self.gated("findings", "--since", "30d")
+        self.assertNotIn("finding 1", out)
+        self.assertIn("finding 0", out)
+        code, _, err = self.gated("findings", "--since", "soon")
+        self.assertIn("like 30d", err)
+
+    def test_status_since_filters_old_runs(self):
+        self.simple_workflow([])
+        run = self.start()
+        run.state["updatedAt"] = "2020-01-01T00:00:00Z"
+        from gated_lib.core import write_json
+        write_json(run.dir / "state.json", run.state)
+        code, out, _ = self.gated("status", "--since", "7d")
+        self.assertIn("No runs", out)
+
+
+class FreshContextTest(GatedCase):
+    """Every phase must be done by a subagent that hasn't worked on another phase."""
+
+    def two_checkpoints(self, **extra):
+        self.workflow("demo", {"checkpoints": [{"id": "one", "step": "s.md", "gates": []},
+                                               {"id": "two", "step": "s.md", "gates": []}], **extra}, {"s.md": "x"})
+        return self.start(session="owner")
+
+    def write_todo(self, run, cp):
+        (run.dir / cp / "todo.md").write_text("- [x] done\n")
+
+    def test_no_subagent_fails(self):
+        run = self.two_checkpoints()
+        self.write_todo(run, "one")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertIn("no subagent worked on this checkpoint", err)
+
+    def test_reusing_a_subagent_across_phases_fails(self):
+        run = self.two_checkpoints()
+        self.todos_done(run, "one", agent="worker")
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().current()["id"], "two")
+        self.todos_done(run, "two", agent="worker")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertIn("already worked on an earlier phase", err)
+        self.subagent_call(run, "worker-2")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("The run is done", err)
+
+    def test_same_subagent_may_fix_its_own_checkpoint(self):
+        run = self.two_checkpoints()
+        self.todos_done(run, "one", agent="worker")
+        self.subagent_call(run, "worker")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("Start checkpoint 'two'", err)
+
+    def test_orchestrator_editing_files_fails(self):
+        run = self.two_checkpoints()
+        self.todos_done(run, "one")
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Edit", "tool_input": {"file_path": str(self.project / "app.py")}})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertIn("orchestrator changed files itself", err)
+        self.assertIn("app.py", err)
+
+    def test_orchestrator_shell_writes_count_but_gated_calls_do_not(self):
+        run = self.two_checkpoints()
+        self.todos_done(run, "one")
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Bash", "tool_input": {"command": "python3 bin/gated check"}})
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Bash", "tool_input": {"command": "git status"}})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("Start checkpoint 'two'", err)
+        self.todos_done(run, "two")
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Bash", "tool_input": {"command": "echo hi > notes.txt"}})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("orchestrator changed files itself", err)
+
+    def test_plan_needs_a_planning_subagent(self):
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        code, _, err = self.gated("submit-plan")
+        self.assertEqual(code, 1)
+        self.assertIn("no planning subagent", err)
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+
+    def test_planner_cannot_also_build(self):
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        self.submit_plan()
+        self.hook("prompt", {"session_id": "owner", "prompt": "approve"})
+        run = self.run_obj()
+        self.todos_done(run, "a", agent="planner")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("already worked on an earlier phase", err)
+        self.assertIn("planner (plan)", err)
+
+    def test_command_shapes_from_the_live_run(self):
+        # Seen in the live Claude rehearsal on 2026-09-25: these must not count as orchestrator edits.
+        run = self.two_checkpoints()
+        self.todos_done(run, "one")
+        g = str(self.home / "skills" / "gated" / "bin" / "gated")
+        for cmd in (f'python3 "{g}" step', f'python3 "{g}" check 2>&1', f"python3 {g} status | tail -5",
+                    f"cat {run.dir}/one/todo.md 2>/dev/null", "ls -la .gated/runs/ 2>&1",
+                    f'python3 "{g}" check; echo "exit: $?"', "python3 -c 'import json; print(1)'"):
+            code, _, err = self.hook("pretool", {"session_id": "owner", "tool_name": "Bash",
+                                                 "tool_input": {"command": cmd, "description": "Check gates; report exit"}})
+            self.assertEqual(code, 0, f"{cmd}: {err}")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("Start checkpoint 'two'", err)
+
+    def test_subagent_may_write_its_own_working_files_by_shell(self):
+        run = self.two_checkpoints()
+        for cmd in (f"printf -- '- [x] a\\n' > {run.dir}/one/todo.md",
+                    f"echo '- stale README' >> {run.dir / 'one' / 'findings.md'}"):
+            code, _, err = self.hook("pretool", {"session_id": "owner", "agent_id": "w", "tool_name": "Bash", "tool_input": {"command": cmd}})
+            self.assertEqual(code, 0, f"{cmd}: {err}")
+        code, _, _ = self.hook("pretool", {"session_id": "owner", "agent_id": "w", "tool_name": "Bash",
+                                          "tool_input": {"command": f"echo x > {run.dir}/state.json"}})
+        self.assertEqual(code, 2)
+
+    def test_denied_commands_from_the_second_live_run_are_allowed(self):
+        # Exact shapes the hook wrongly denied in the Claude run on 2026-09-25.
+        run = self.two_checkpoints()
+        d = run.dir / "one"
+        g = "/x/skills/gated/bin/gated"
+        for agent, cmd in (
+            ("w", f"mkdir -p {d} && printf -- '- [ ] Create a.txt\\n' > {d}/todo.md && ls {self.project}"),
+            ("w", f"D={d}; mkdir -p $D && printf -- '- [x] done\\n' > $D/todo.md && printf 'beta' > {self.project}/b.txt"),
+            ("w", f"echo '- README is stale' >> {d}/findings.md"),
+            (None, f'python3 "{g}" check; cat {self.project}/a.txt; cat {d}/todo.md; ls {d}/'),
+            (None, "cat a.txt; cat .gated/runs/demo-1/one/todo.md; ls .gated/runs/demo-1/one/"),
+        ):
+            payload = {"session_id": "owner", "tool_name": "Bash", "tool_input": {"command": cmd, "description": "x"}}
+            if agent:
+                payload["agent_id"] = agent
+            code, _, err = self.hook("pretool", payload)
+            self.assertEqual(code, 0, f"{cmd}\n{err}")
+
+    def test_protected_files_still_denied_inside_chains_and_pipes(self):
+        run = self.two_checkpoints()
+        for cmd in (f"cat {run.dir}/state.json; echo x > {run.dir}/state.json",
+                    f"echo '{{}}' | tee -a {run.dir}/activity.jsonl",
+                    f"D={run.dir}; sed -i '' s/running/done/ $D/state.json"):
+            code, _, _ = self.hook("pretool", {"session_id": "owner", "agent_id": "w", "tool_name": "Bash", "tool_input": {"command": cmd}})
+            self.assertEqual(code, 2, cmd)
+        code, _, _ = self.hook("pretool", {"session_id": "owner", "tool_name": "Bash",
+                                          "tool_input": {"command": f"cat {run.dir}/state.json | python3 -m json.tool"}})
+        self.assertEqual(code, 0, "reading state through a pipe is fine")
+
+    def test_chained_gated_call_is_not_exempt(self):
+        run = self.two_checkpoints()
+        self.todos_done(run, "one")
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Bash", "tool_input": {"command": "python3 bin/gated status; echo x > app.py"}})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("orchestrator changed files itself", err)
+
+    def test_workflow_can_opt_out(self):
+        run = self.two_checkpoints(freshContext=False)
+        self.write_todo(run, "one")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("Start checkpoint 'two'", err)
+
+    def test_activity_log_is_protected(self):
+        run = self.two_checkpoints()
+        path = run.dir / "activity.jsonl"
+        code, _, _ = self.hook("pretool", {"session_id": "owner", "tool_name": "Write", "tool_input": {"file_path": str(path)}})
+        self.assertEqual(code, 2)
+        code, _, _ = self.hook("pretool", {"session_id": "owner", "tool_name": "Bash",
+                                          "tool_input": {"command": "echo '{}' >> activity.jsonl"}})
+        self.assertEqual(code, 2)
+
+
+class LearnTest(GatedCase):
+    def test_report_and_learn_work_after_the_run_is_done(self):
+        # Found in live rehearsal 1: `gated report` said "no active run" once the run finished.
+        self.use_example("hello")
+        run = self.start("hello")
+        self.todos_done(run, "greet")
+        (run.dir / "hello.md").write_text("# Hello\nx\n## Today\n2026-09-24\n")
+        runner.check(run)
+        code, out, err = self.gated("report")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Status: **done**", out)
+        code, out, err = self.gated("learn", "shorter greetings")
+        self.assertEqual(code, 0, err)
+
+    def test_appends_dated_line(self):
+        wdir = self.simple_workflow([])
+        self.gated("learn", "keep titles short", "--workflow", "demo")
+        self.gated("learn", "no emoji", "--workflow", "demo")
+        text = (wdir / "learnings.md").read_text()
+        self.assertIn(": keep titles short", text)
+        self.assertIn(": no emoji", text)
