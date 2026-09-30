@@ -1,7 +1,8 @@
 ---
 name: gated
 description: Run a workflow as a series of checkpoints, each blocked by gates that code checks instead of the agent. Use when the user types /gated, asks to run a named workflow (implement-story, weekly-report, onboarding or any of their own), wants a long job done "properly" with enforced tests or reviews, wants to create a new repeatable workflow, or asks for the status of a gated run. Also the entry point for scheduled tasks that run a workflow by name.
-argument-hint: "<workflow> [key=value ...] | new <name> | customize <workflow> | status | findings | resume [run]"
+argument-hint: "[workflow] [key=value ...] | new <name> | customize <workflow> | status | findings | resume [run]"
+allowed-tools: Bash(python3 *bin/gated*)
 ---
 
 # gated
@@ -19,9 +20,9 @@ worked on any other phase did the work, and fails if you edited files
 yourself. Use a new subagent for each phase. Sending fixes back to the same
 subagent within a checkpoint is fine.
 
- A checkpoint is finished when its
-gates pass, and `bin/gated` checks them, not you. You can be wrong as many
-times as the attempt budget allows. You can't move on until the gates agree.
+A checkpoint is finished when its gates pass, and `bin/gated` checks them,
+not you. You can be wrong as many times as the attempt budget allows. You
+can't move on until the gates agree.
 
 Arguments: `$ARGUMENTS`
 
@@ -43,13 +44,31 @@ person, and ask them to restart the session.
 
 | Arguments | Do this |
 | --- | --- |
-| empty | Run `gated list` and `gated status`, then ask which workflow to run. Recommend one. |
+| empty | Show the picker. See "Picking a workflow". |
 | `status` | Run `gated status` and summarize it in a few lines. |
 | `findings [--since 30d]` | Run `gated findings` and group what keeps coming up. Suggest a workflow change or a `gated learn` line for anything repeated. |
 | `resume [run]` | Run `gated resume [--run <id>]`, then continue the loop below from wherever the run is. |
 | `new <name>` | Write a new workflow with the person. See "Writing a workflow". |
 | `customize <workflow>` | Make a workflow the team's own. See "Customizing a workflow". |
 | `<workflow> [key=value ...]` | Start and run it. See "Running a workflow". |
+
+## Picking a workflow
+
+A bare `/gated` is the whole interface for most people. Make it one tap.
+
+1. Run `gated status --since 7d` and `gated list`.
+2. If a run in this project is `waiting`, `awaiting-approval` or `blocked`,
+   the first choice is to pick it back up (`resume`).
+3. Ask with your question tool (AskUserQuestion in Claude Code): one option
+   per workflow, its description as the option's description, the one that
+   fits this project best first and marked `(Recommended)`. Add "Write a new
+   workflow" as the last option. Without a question tool, print the same
+   choices as a short numbered list.
+4. Ask for the chosen workflow's required inputs only, in one message, with
+   a suggested value for each where the project makes one obvious (the
+   test command from `package.json`, the repository from `git remote`).
+   Defaults stay defaults.
+5. Start it.
 
 ## Running a workflow
 
@@ -88,9 +107,10 @@ person, and ask them to restart the session.
    say is feedback: have a subagent act on it, then `gated check`. They can
    also type `cancel run` to end the run.
 5. **Finishing.** When the run is `done`, show `gated report` in a few lines
-   and ask the person to try the result. Summarize the report. Where it and
-   what a subagent told you disagree, check the files and say which is true. Mention anything under "Found, not
-   fixed" and ask whether it deserves its own run.
+   and ask the person to try the result. Where the report and what a
+   subagent told you disagree, check the files and say which is true.
+   Mention anything under "Found, not fixed" and ask whether it deserves its
+   own run.
    - Record what they tell you with `gated learn "<one sentence>"`. Every
      later run of this workflow reads it.
    - If they want changes, write them as checkpoints in a JSON file (same shape
