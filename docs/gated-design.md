@@ -81,7 +81,7 @@ A workflow folder holds `workflow.json`, one markdown file per step, and
       "id": "write",
       "step": "steps/write.md",
       "gates": [
-        { "id": "report", "type": "file", "path": "{{run}}/report.md",
+        { "id": "report", "type": "file", "path": "{{run}}/weekly.md",
           "headings": ["Summary", "Merged", "Risks"], "links": "resolve" }
       ]
     }
@@ -298,7 +298,7 @@ checkpoint with its own gates, and the feedback goes into the workflow's
 ## Findings
 
 A step that notices something it won't fix writes it to
-`{{run}}/<checkpoint>/findings.md` as a `- ` line. Findings aren't gates and
+`{{run}}/<checkpoint>/noticed.md` as a `- ` line. Findings aren't gates and
 never change a run. The Stop hook records each line once, the report lists
 them under "Found, not fixed", and `gated findings --since 30d` gathers them
 across every run in the project. What keeps coming up becomes a `gated learn`

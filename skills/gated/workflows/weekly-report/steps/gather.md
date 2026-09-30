@@ -6,7 +6,7 @@ Collect every pull request merged into {{input.repo}} in the last {{input.days}}
    ```bash
    gh pr list --repo {{input.repo}} --state merged --limit 200 \
      --search "merged:>=<start date>" \
-     --json number,title,url,author,mergedAt
+     --json number,title,url,author,mergedAt,additions,deletions,changedFiles,labels
    ```
 
 3. Write the result to `{{run}}/prs.json` as a JSON array. Keep GitHub's

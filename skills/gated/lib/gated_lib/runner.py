@@ -362,7 +362,7 @@ def advance(run: Run) -> str:
 
 
 def findings_path(run: Run, cp: Dict[str, Any]) -> Path:
-    return run.dir / cp["id"] / "findings.md"
+    return run.dir / cp["id"] / "noticed.md"
 
 
 def collect_findings(run: Run, cp: Dict[str, Any]) -> int:

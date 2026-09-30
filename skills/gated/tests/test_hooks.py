@@ -103,6 +103,13 @@ class PreToolTest(GatedCase):
     def test_state_file_denied(self):
         self.assertEqual(self.pre("Write", {"file_path": str(self.run.dir / "state.json")})[0], 2)
 
+    def test_denied_edit_is_not_logged_as_activity(self):
+        # Live run 2026-09-30: a denied state.json edit counted as a second orchestrator change.
+        log = self.run.dir / "activity.jsonl"
+        before = log.read_text() if log.exists() else ""
+        self.assertEqual(self.pre("Edit", {"file_path": self.locked})[0], 2)
+        self.assertEqual(log.read_text() if log.exists() else "", before)
+
     def test_other_session_not_affected(self):
         self.assertEqual(self.pre("Edit", {"file_path": self.locked}, session="other")[0], 0)
 
@@ -119,6 +126,14 @@ class PreToolTest(GatedCase):
         self.assertTrue(names_file("sed -i '' x \"$D/state.json\"", "state.json"))
         self.assertFalse(names_file("echo x >> run/one/findings.md", "s.md"))
         self.assertFalse(names_file("echo x > old-state.json.bak", "state.json"))
+
+    def test_quoted_greater_than_is_not_an_edit(self):
+        # Live run 2026-09-30: a read-only gh search flagged the orchestrator as editing files.
+        from gated_lib.hooks import edits_files
+        self.assertFalse(edits_files('gh pr list --search "merged:>=2026-09-23" --json number'))
+        self.assertFalse(edits_files("python3 -c \"print(1 > 0)\""))
+        self.assertTrue(edits_files('echo "x" > out.md'))
+        self.assertTrue(edits_files("sed -i 's/a/b/' f.md"))
 
     def test_shell_writes_to_locked_file(self):
         self.assertEqual(self.pre("Bash", {"command": f"echo x > {self.locked}"})[0], 2)

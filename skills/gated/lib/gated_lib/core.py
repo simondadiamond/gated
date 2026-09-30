@@ -21,6 +21,9 @@ ACTIVE_STATUSES = ("planning", "awaiting-approval", "running", "waiting")
 FINISHED_STATUSES = ("done", "blocked", "cancelled")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
+# Claude Code refuses a subagent Write to a file named like this (found live 2026-09-30), so a file
+# gate on such a name can never pass there.
+SUBAGENT_BLOCKED_NAME_RE = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.I)
 
 
 class GatedError(Exception):
@@ -153,6 +156,9 @@ def lint_gate(gate: Any, where: str, wdir: Optional[Path], errors: List[str]) ->
         for inp in gate.get("inputs", []):
             if not (isinstance(inp, dict) and (("run" in inp) ^ ("file" in inp))):
                 errors.append(f"{where}: judge gate '{gid}' inputs are objects with either 'run' or 'file'")
+    if kind == "file" and isinstance(gate.get("path"), str) and SUBAGENT_BLOCKED_NAME_RE.match(Path(gate["path"]).name):
+        errors.append(f"{where}: file gate '{gid}' path {Path(gate['path']).name} starts with report, summary, findings "
+                      "or analysis; Claude Code won't let a subagent write that name. Rename the file")
     if kind == "file" and "links" in gate and gate["links"] != "resolve":
         errors.append(f"{where}: file gate '{gid}' links must be \"resolve\"")
     for key in ("timeout", "attempts"):

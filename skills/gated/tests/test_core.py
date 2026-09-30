@@ -46,6 +46,11 @@ class LintTest(GatedCase):
         errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [{"id": "todos", "type": "todos"}]}]}, {"a.md": "x"})
         self.assertTrue(any("automatically" in e for e in errors), errors)
 
+    def test_file_gate_name_claude_code_blocks_for_subagents(self):
+        gate = {"id": "f", "type": "file", "path": "{{run}}/Report-7d.md"}
+        errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [gate]}]}, {"a.md": "x"})
+        self.assertTrue(any("won't let a subagent write" in e for e in errors), errors)
+
     def test_needs_checkpoints_or_plan(self):
         self.assertTrue(any("needs 'checkpoints'" in e for e in self.lint({})))
 

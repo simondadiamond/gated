@@ -126,7 +126,7 @@ Commands run with `/bin/sh` in the project root. They see `GATED_RUN`,
   checkpoints.json           the planner's working file
   plan-<n>.json              submitted plans, locked
   <checkpoint>/todo.md       the to-do list
-  <checkpoint>/findings.md   things the step noticed but didn't fix, one `- ` line each
+  <checkpoint>/noticed.md   things the step noticed but didn't fix, one `- ` line each
   <checkpoint>/splits.md     stories the step created for work it split off, one `- <issue URL> why` line each
   activity.jsonl             every tool call during the run, with the caller's agent id
   <checkpoint>/gates/*.log   each gate's last output
@@ -156,7 +156,7 @@ checkpoint, so scope can't be dropped by claiming a story that doesn't exist.
 The report lists verified splits under "Split into new stories".
 
 Findings aren't gates. The Stop hook records each `- ` line in a checkpoint's
-`findings.md` once, the report lists them under "Found, not fixed", and
+`noticed.md` once, the report lists them under "Found, not fixed", and
 `gated findings --since 30d` gathers them across runs.
 
 `gated check`, when the agent runs it, only reports. The Stop hook is the only

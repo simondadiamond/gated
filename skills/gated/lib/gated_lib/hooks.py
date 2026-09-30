@@ -27,6 +27,12 @@ WRITE_HINT_RE = re.compile(r"(>|\btee\b|\bsed\b|\brm\b|\bmv\b|\bcp\b|\bln\b|\btr
                            r"|\b(?:python3?|perl|node|ruby)\b[^|;&]*\s-(?:c|e|i|pi)\b|\bgit\s+(checkout|restore|stash|reset)\b)")
 GATED_CALL_RE = re.compile(r"""^\s*(?:python3\s+)?["']?[^\s"';&|]*\bgated["']?\s+[a-z-]+\b""")
 HARMLESS_REDIRECT_RE = re.compile(r"\d*>&\d|\d*>\s*/dev/null")
+# A '>' inside quotes is an argument, not a redirect: `gh pr list --search "merged:>=2026-09-23"`.
+QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def unquoted(command: str) -> str:
+    return HARMLESS_REDIRECT_RE.sub("", QUOTED_RE.sub('""', command))
 CHAINING_RE = re.compile(r";|&&|\|\||`|\$\(|\n")
 
 
@@ -60,7 +66,7 @@ def names_file(segment: str, name: str) -> bool:
 
 def edits_files(command: str) -> bool:
     for segment in SEGMENT_RE.split(command):
-        if segment.strip() and not is_gated_call(segment) and EDIT_HINT_RE.search(HARMLESS_REDIRECT_RE.sub("", segment)):
+        if segment.strip() and not is_gated_call(segment) and EDIT_HINT_RE.search(unquoted(segment)):
             return True
     return False
 
@@ -142,7 +148,13 @@ def pretool(payload: Dict[str, Any]) -> Decision:
         return Decision()
     tool = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") or {}
-    record_activity(run, payload, tool, tool_input)
+    decision = guard(run, payload, tool, tool_input)
+    if decision.code == 0:  # a denied call changed nothing, so it mustn't count against fresh-context
+        record_activity(run, payload, tool, tool_input)
+    return decision
+
+
+def guard(run: Run, payload: Dict[str, Any], tool: str, tool_input: Dict[str, Any]) -> Decision:
     protected = protected_paths(run)
     cwd = Path(payload.get("cwd") or run.project)
 
