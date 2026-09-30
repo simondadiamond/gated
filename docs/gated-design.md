@@ -257,8 +257,10 @@ that file. From it:
   next), and the orchestrator made no edits, including write-looking shell
   commands.
 
-Sending fixes back to the same subagent inside one checkpoint is allowed; that
-subagent keeps its context for the correction. For each
+Fixes inside one checkpoint go to a new foreground subagent with the check's
+output. Continuing the first one with SendMessage runs it in the background in
+Claude Code, and waiting for it means ending the turn, so the Stop hook would
+judge the files before the fix lands (seen live, 2026-09-30). For each
 checkpoint it sends a subagent a fresh context holding:
 
 - the step file,

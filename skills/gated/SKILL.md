@@ -17,8 +17,8 @@ This is enforced. The hooks log every tool call with the id of the agent that
 made it. A plan is refused unless a planning subagent wrote it. Every
 checkpoint has a `fresh-context` gate that fails unless a subagent that hasn't
 worked on any other phase did the work, and fails if you edited files
-yourself. Use a new subagent for each phase. Sending fixes back to the same
-subagent within a checkpoint is fine.
+yourself. Use a new subagent for each phase. Within one checkpoint, more
+subagents for fixes are fine.
 
 A checkpoint is finished when its gates pass, and `bin/gated` checks them,
 not you. You can be wrong as many times as the attempt budget allows. You
@@ -79,7 +79,8 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
 2. **Plan, if the run says `planning`.**
    - Run `gated step` and give its whole output to a planning subagent.
    - When the subagent returns, run `gated submit-plan`. If it lists problems,
-     send them back to the same subagent and submit again.
+     give them to a new foreground planning subagent along with the plan's
+     path, and submit again.
    - Show the person the plan summary it prints, and nothing more. If the run
      wrote acceptance criteria first (`implement-story` does), show those too,
      marking any `(assumed)`, so one approval covers both. Ask them to type
@@ -95,9 +96,12 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
      what the step needs. A fresh context is the point.
    - When the subagent returns, run `gated check`. It only reports; it never
      moves the run.
-   - If a gate fails, send the check's output back to the same subagent (in
-     Claude Code, SendMessage to its id) and let it fix the work. Then run
-     `gated check` again.
+   - If a gate fails, start a new foreground subagent with the same brief,
+     the check's output, and a note that the earlier work is in place and
+     only the failures need fixing. Then run `gated check` again. Don't
+     continue the first subagent with SendMessage: in Claude Code that runs
+     in the background, and the only way to wait for it is to end your turn,
+     which makes the Stop hook judge the files before the fix lands.
    - When every gate passes, end your turn. The Stop hook reruns the gates
      itself, moves the run to the next checkpoint and tells you which one.
      Run `gated step` again and repeat. Only the hook can advance a run.
@@ -127,8 +131,9 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
   they fail, you're told why and you keep going. That counts as one attempt.
   When a gate uses up its attempts (5 unless the workflow says otherwise), the
   run stops as `blocked`. No gate is ever skipped.
-- Run subagents in the foreground. If you end your turn while a background
-  subagent works, the hook checks unfinished work and spends an attempt.
+- Run subagents in the foreground, and never end your turn while one is
+  still working: the hook checks the files as they are, and a pass on
+  unfinished work moves the run on without checking what lands later.
 - A blocked run isn't a failure to hide. Show the report, say which gate is
   stuck and what it last printed, and suggest the fix. Only the person can
   grant fresh attempts: run `gated resume`, then ask them to type `approve`.
@@ -200,7 +205,9 @@ folder. Read `references/workflow-format.md` and
 4. Show the person the checkpoints and gates as a short list. Push back on any
    gate an agent could pass without doing the work.
 5. Write the folder, run `gated lint <name>` until it's clean, and offer a
-   first run.
+   first run. Claude Code asks the person before any write under `.claude/`;
+   that's expected. If they refuse, write it elsewhere and give them the one
+   `mv` that puts it in place.
 
 If the process needs a plan per run (a feature, a migration), give the workflow
 a `plan` step instead of fixed checkpoints. If it's the same every time (a
