@@ -1,0 +1,28 @@
+{
+  "name": "weekly-report",
+  "description": "Summarize a repository's merged pull requests for the last N days. Safe to schedule.",
+  "inputs": {
+    "repo": { "required": true, "description": "owner/name on GitHub" },
+    "days": { "default": "7", "description": "how many days back to look" }
+  },
+  "checkpoints": [
+    {
+      "id": "gather",
+      "title": "Gather merged PRs",
+      "step": "steps/gather.md",
+      "gates": [
+        { "id": "data", "type": "file", "path": "{{run}}/prs.json", "json": true },
+        { "id": "shape", "type": "command", "run": "python3 \"{{workflow}}/checks/prs-shape.py\" \"{{run}}/prs.json\"" }
+      ]
+    },
+    {
+      "id": "write",
+      "title": "Write the report",
+      "step": "steps/write.md",
+      "gates": [
+        { "id": "report", "type": "file", "path": "{{run}}/report-{{input.days}}d.md", "headings": ["Summary", "Merged", "Risks"], "links": "resolve" },
+        { "id": "complete", "type": "command", "run": "python3 \"{{workflow}}/checks/every-pr-listed.py\" \"{{run}}/prs.json\" \"{{run}}/report-{{input.days}}d.md\"" }
+      ]
+    }
+  ]
+}
