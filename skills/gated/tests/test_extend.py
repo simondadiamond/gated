@@ -181,8 +181,19 @@ class ImplementStoryChecksTest(GatedCase):
         test_file.write_text(test_file.read_text() + 'test("AC-2: edge", ...)\n')
         self.assertEqual(self.run_script(self.script("criteria-covered.py"), run).returncode, 0)
 
+    def test_committing_workflow_needs_git_identity(self):
+        # Live run 2026-09-30: the first auto-commit failed mid-run on a clone with no identity.
+        self.use_example("implement-story")
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+            code, _, err = self.gated("start", "implement-story", "story=x", "test=true")
+        self.assertEqual(code, 1)
+        self.assertIn("user.email", err)
+
     def test_implement_story_starts_with_criteria(self):
         self.use_example("implement-story")
+        self.git_init()
         run = self.start("implement-story", "story=add leave approvals", "test=true", session="owner")
         self.assertEqual((run.status, run.current()["id"]), ("running", "acceptance-criteria"))
         code, out, _ = self.gated("step")
