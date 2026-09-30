@@ -234,7 +234,8 @@ def check_fresh_context(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> D
     """A new subagent did this checkpoint's work, and the orchestrator edited nothing itself.
     The hooks log every tool call with the caller's agent_id, so this is checked, not claimed."""
     rows = read_activity(run)
-    mine = [r for r in rows if r.get("phase") == cp["id"]]
+    # After the person grants fresh attempts, only the redo counts; the report told them what came before.
+    mine = [r for r in rows[cp.get("freshFrom", 0):] if r.get("phase") == cp["id"]]
     agents = {r["agent"] for r in mine if r.get("agent") != "main"}
     earlier = {r["agent"]: r["phase"] for r in rows if r.get("phase") != cp["id"] and r.get("agent") != "main"}
     reused = sorted(a for a in agents if a in earlier)

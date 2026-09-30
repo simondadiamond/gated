@@ -294,6 +294,8 @@ def approve(run: Run, text: str) -> str:
                 del run.state["attempts"][key]
         for k in ("blockedOn", "resumeRequested"):
             run.state.pop(k, None)
+        if cp:  # fresh-context judges only activity logged after this: the checkpoint is redone
+            cp["freshFrom"] = len(G.read_activity(run))
         run.state["approvals"].append({**stamp, "gate": "resume"})
         run.state["status"] = "planning" if not run.state["checkpoints"] else "running"
         run.save()

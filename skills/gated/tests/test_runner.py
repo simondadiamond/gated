@@ -88,6 +88,26 @@ class FixedRunTest(GatedCase):
         self.assertEqual(run.state["owner"], "s2")
         self.assertEqual(run.state["attempts"], {})
 
+    def test_fresh_attempts_forgive_earlier_orchestrator_edits(self):
+        # Live run 2026-09-30: after the orchestrator edited files, fresh-context could never pass
+        # again, even once the person granted fresh attempts and a new subagent redid the work.
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}], attempts=1)
+        run = self.start(session="owner")
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Write", "tool_input": {"file_path": str(self.project / "x")}})
+        self.todos_done(run)
+        runner.check(run, count_attempts=True)
+        self.assertEqual(self.run_obj().status, "blocked")
+        _, out, _ = self.gated("resume", "--run", run.id)
+        claim = next(line for line in out.splitlines() if line.startswith("gated-claim:"))
+        self.hook("posttool", {"session_id": "s2", "tool_response": claim})
+        self.hook("prompt", {"session_id": "s2", "prompt": "approve"})
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.todos_done(run, agent="sub-redo")
+        from gated_lib import gates as G
+        fresh = next(g for g in run.current()["gates"] if g["id"] == "fresh-context")
+        self.assertTrue(G.evaluate(run, run.current(), fresh)["ok"])
+
     def test_tampered_definition_fails_every_check(self):
         wdir = self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
         run = self.start()
