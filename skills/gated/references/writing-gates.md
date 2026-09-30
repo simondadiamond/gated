@@ -11,7 +11,9 @@ that route.
    workflow's `checks/` folder.
 2. **`file`**, when the output is a document or data. Check its structure
    (`headings`, `json`), its content (`contains`), and its links (`links:
-   "resolve"`). Existence alone proves nothing.
+   "resolve"`). Existence alone proves nothing. The link check fetches
+   without logging in, so a private repo's links or any page behind a login
+   fail it; don't use it for those.
 3. **`red-first`**, whenever a checkpoint adds tests. The tests must fail
    before the code exists and pass after, unchanged. That kills tests that
    assert nothing.
@@ -33,7 +35,11 @@ that route.
 
 A gate that compares two sources is strong because the agent controls neither.
 Example: every URL in `prs.json` (fetched from GitHub) must appear in
-`report.md`.
+`weekly.md`.
+
+Don't name a file a subagent writes `report*.md`, `summary*.md`,
+`findings*.md` or `analysis*.md`: Claude Code refuses those writes from
+subagents, so the gate could never pass. `gated lint` catches it.
 
 ## Examples by kind of work
 
@@ -48,7 +54,7 @@ Example: every URL in `prs.json` (fetched from GitHub) must appear in
 **Documents and reports**
 
 ```json
-{ "id": "report", "type": "file", "path": "{{run}}/report.md",
+{ "id": "report", "type": "file", "path": "{{run}}/weekly.md",
   "headings": ["Summary", "Risks"], "contains": ["\\d+ merged"], "links": "resolve" }
 { "id": "complete", "type": "command", "run": "python3 {{workflow}}/checks/every-pr-listed.py {{run}}" }
 ```

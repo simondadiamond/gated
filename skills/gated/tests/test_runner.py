@@ -269,7 +269,7 @@ class ShippedExamplesTest(GatedCase):
         self.todos_done(run, "gather")
         runner.check(run)
         self.assertEqual(run.current()["id"], "write")
-        (run.dir / "report-7d.md").write_text("# Summary\nx\n## Merged\n- #1 https://github.com/a/b/pull/1\n## Risks\nNone\n")
+        (run.dir / "weekly-7d.md").write_text("# Summary\nx\n## Merged\n- #1 https://github.com/a/b/pull/1\n## Risks\nNone\n")
         from gated_lib import gates as G
         complete = next(g for g in run.current()["gates"] if g["id"] == "complete")
         r = G.evaluate(run, run.current(), complete)
@@ -441,7 +441,7 @@ class FindingsTest(GatedCase):
     def test_hook_records_each_finding_once_and_report_lists_them(self):
         self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
         run = self.start(session="owner")
-        path = run.dir / "one" / "findings.md"
+        path = run.dir / "one" / "noticed.md"
         path.write_text("- src/a.py:10 swallows errors, out of scope\nnot a finding line\n")
         self.hook("stop", {"session_id": "owner"})
         path.write_text("- src/a.py:10 swallows errors, out of scope\n- README install step is stale\n")
@@ -456,7 +456,7 @@ class FindingsTest(GatedCase):
     def test_agent_check_does_not_record_findings(self):
         self.simple_workflow([])
         run = self.start()
-        (run.dir / "one" / "findings.md").write_text("- something\n")
+        (run.dir / "one" / "noticed.md").write_text("- something\n")
         self.gated("check")
         self.assertEqual(self.run_obj().state.get("findings", []), [])
 
@@ -464,7 +464,7 @@ class FindingsTest(GatedCase):
         self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
         for n, session in enumerate(("a", "b")):
             run = self.start(session=session)
-            (run.dir / "one" / "findings.md").write_text(f"- finding {n}\n")
+            (run.dir / "one" / "noticed.md").write_text(f"- finding {n}\n")
             self.hook("stop", {"session_id": session})
         old = self.run_obj()
         old.state["findings"][0]["at"] = "2020-01-01T00:00:00Z"
@@ -587,7 +587,7 @@ class FreshContextTest(GatedCase):
     def test_subagent_may_write_its_own_working_files_by_shell(self):
         run = self.two_checkpoints()
         for cmd in (f"printf -- '- [x] a\\n' > {run.dir}/one/todo.md",
-                    f"echo '- stale README' >> {run.dir / 'one' / 'findings.md'}"):
+                    f"echo '- stale README' >> {run.dir / 'one' / 'noticed.md'}"):
             code, _, err = self.hook("pretool", {"session_id": "owner", "agent_id": "w", "tool_name": "Bash", "tool_input": {"command": cmd}})
             self.assertEqual(code, 0, f"{cmd}: {err}")
         code, _, _ = self.hook("pretool", {"session_id": "owner", "agent_id": "w", "tool_name": "Bash",
@@ -602,7 +602,7 @@ class FreshContextTest(GatedCase):
         for agent, cmd in (
             ("w", f"mkdir -p {d} && printf -- '- [ ] Create a.txt\\n' > {d}/todo.md && ls {self.project}"),
             ("w", f"D={d}; mkdir -p $D && printf -- '- [x] done\\n' > $D/todo.md && printf 'beta' > {self.project}/b.txt"),
-            ("w", f"echo '- README is stale' >> {d}/findings.md"),
+            ("w", f"echo '- README is stale' >> {d}/noticed.md"),
             (None, f'python3 "{g}" check; cat {self.project}/a.txt; cat {d}/todo.md; ls {d}/'),
             (None, "cat a.txt; cat .gated/runs/demo-1/one/todo.md; ls .gated/runs/demo-1/one/"),
         ):
