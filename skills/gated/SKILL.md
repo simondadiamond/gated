@@ -88,7 +88,8 @@ person, and ask them to restart the session.
    say is feedback: have a subagent act on it, then `gated check`. They can
    also type `cancel run` to end the run.
 5. **Finishing.** When the run is `done`, show `gated report` in a few lines
-   and ask the person to try the result. Mention anything under "Found, not
+   and ask the person to try the result. Summarize the report, not what
+   subagents told you: where they differ, the report is right. Mention anything under "Found, not
    fixed" and ask whether it deserves its own run.
    - Record what they tell you with `gated learn "<one sentence>"`. Every
      later run of this workflow reads it.

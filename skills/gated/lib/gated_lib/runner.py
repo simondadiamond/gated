@@ -104,6 +104,10 @@ def start(project: Path, name: str, args: List[str]) -> Run:
     wdir = find_workflow(name, project)
     wf = load_workflow(wdir)
     inputs = parse_inputs(wf, args)
+    if wf.get("commit") and not subprocess.run(["git", "-C", str(project), "config", "user.email"],
+                                               capture_output=True).stdout.strip():
+        raise GatedError("this workflow commits after each checkpoint, and git has no user.email in this "
+                         "repository. Set it first: git config user.name \"<name>\" && git config user.email <email>")
     runs_root(project).mkdir(parents=True, exist_ok=True)
     ignore_runs(project)
     while True:  # two starts at once each get their own id
