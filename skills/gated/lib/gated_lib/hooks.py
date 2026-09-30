@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import runner
-from .core import FINISHED_STATUSES, Run, locked, now, owned_run, record_owner, session_run_dir, take_claim
+from .core import FINISHED_STATUSES, SKILL_DIR, Run, locked, now, owned_run, record_owner, session_run_dir, take_claim
 
 # The whole message has to be the word, so "go ahead and change step 2" is feedback, not approval.
 APPROVE_RE = re.compile(r"^\s*(approve|approved|lgtm|ship it|yes)\s*[.!]*\s*$", re.IGNORECASE)
@@ -47,6 +47,15 @@ def is_gated_call(command: str) -> bool:
 EDIT_HINT_RE = re.compile(r"(>|\btee\b|\bsed\s+-i|\brm\b|\bmv\b|\bcp\b|\bln\b|\btruncate\b|\binstall\b|\bgit\s+(checkout|restore|stash|reset|apply|commit|merge|rebase)\b)")
 SEGMENT_RE = re.compile(r";|&&|\|\||\n")
 PIPELINE_RE = re.compile(r";|&&|\|\|?|\n")
+
+
+def is_own_cli(command: str) -> bool:
+    """A single call to this install's bin/gated, not to any file that happens to be named gated."""
+    if not is_gated_call(command):
+        return False
+    words = command.split("|")[0].split()
+    path = words[1] if words[0] == "python3" and len(words) > 1 else words[0]
+    return Path(path.strip("\"'")).expanduser().resolve() == (SKILL_DIR / "bin" / "gated").resolve()
 
 
 def command_text(tool_input: Dict[str, Any]) -> str:
@@ -151,6 +160,11 @@ def pretool(payload: Dict[str, Any]) -> Decision:
     decision = guard(run, payload, tool, tool_input)
     if decision.code == 0:  # a denied call changed nothing, so it mustn't count against fresh-context
         record_activity(run, payload, tool, tool_input)
+        if tool == "Bash" and run.state.get("harness") == "claude" and is_own_cli(command_text(tool_input)):
+            # The run's own CLI, alone and unchained: approve it, so the person isn't asked on every
+            # turn after the one that invoked the skill, and subagents can run `gated red`.
+            decision.stdout = json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                                                 "permissionDecisionReason": "gated's own command"}})
     return decision
 
 

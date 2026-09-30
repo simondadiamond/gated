@@ -127,6 +127,19 @@ class PreToolTest(GatedCase):
         self.assertFalse(names_file("echo x >> run/one/findings.md", "s.md"))
         self.assertFalse(names_file("echo x > old-state.json.bak", "state.json"))
 
+    def test_own_cli_is_approved_without_a_prompt(self):
+        from gated_lib.core import SKILL_DIR
+        from gated_lib.hooks import is_own_cli
+        run = self.run_obj()
+        run.state["harness"] = "claude"
+        run.save()
+        cli = SKILL_DIR / "bin" / "gated"
+        _, out, _ = self.pre("Bash", {"command": f'python3 "{cli}" step'})
+        self.assertIn('"permissionDecision": "allow"', out)
+        self.assertEqual(self.pre("Bash", {"command": f'python3 "{cli}" step; rm -rf x'})[1], "")
+        self.assertFalse(is_own_cli("python3 /tmp/elsewhere/gated step"))
+        self.assertTrue(is_own_cli(f"{cli} check"))
+
     def test_quoted_greater_than_is_not_an_edit(self):
         # Live run 2026-09-30: a read-only gh search flagged the orchestrator as editing files.
         from gated_lib.hooks import edits_files
