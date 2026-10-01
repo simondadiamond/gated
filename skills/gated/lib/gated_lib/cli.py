@@ -77,6 +77,8 @@ def cmd_status(a: argparse.Namespace) -> str:
         where = f"at '{cp['id']}' ({r.state['current'] + 1}/{len(r.state['checkpoints'])})" if cp else ""
         owner = (r.state.get("owner") or "unclaimed")[:8]
         out.append(f"{r.id:<24} {r.status:<18} {where:<28} owner {owner}  updated {r.state.get('updatedAt', '')}")
+        for key, since in sorted(r.state.get("pendingSince", {}).items()):
+            out.append(f"  pending {key} since {since}")
     return "\n".join(out)
 
 

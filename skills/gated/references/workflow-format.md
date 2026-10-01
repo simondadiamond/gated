@@ -138,14 +138,18 @@ Every gate has an `id` (unique in its checkpoint) and a `type`. Optional:
 
 | Type | Required fields | Optional fields |
 | --- | --- | --- |
-| `command` | `run` | `timeout` (default 600) |
+| `command` | `run` | `timeout` (default 600), `pendingExit`, `pendingMax` (default 21600 seconds) |
 | `file` | `path` | `json`, `nonEmpty`, `headings` (list), `contains` (list of regexes), `links: "resolve"` |
 | `red-first` | `run`, `lock` (list of globs) | `timeout` |
 | `judge` | `rubric`: a file in the workflow folder or inline rubric text | `inputs`: list of `{"run": "cmd"}` or `{"file": "path"}`, `maxChars`, `timeout` |
 | `human` | `ask` | |
 
 Commands run with `/bin/sh` in the project root. They see `GATED_RUN`,
-`GATED_RUN_ID`, `GATED_CHECKPOINT` and `GATED_PROJECT`.
+`GATED_RUN_ID`, `GATED_CHECKPOINT` and `GATED_PROJECT`. A command that waits on
+an outside system can set `pendingExit` to an exit code from 1 to 255, except
+126 and 127. That exit reports pending without spending an attempt. If it stays
+pending longer than `pendingMax` seconds, 21600 by default, it becomes a normal
+failure. These fields are allowed only on command gates.
 
 A judge input uses its own `maxChars`, then the judge gate's `maxChars`, then
 200000 by default. The value must be an integer of at least 1000. Oversized
@@ -180,6 +184,10 @@ Starting a run writes `.gated/.gitignore`, so run folders never show up in git.
 | `blocked` | a gate used all its attempts, or `state.json` changed outside gated | lets the turn end; the person types `approve` to grant fresh attempts after `gated resume` |
 | `done` | every checkpoint passed | lets the turn end |
 | `cancelled` | the person typed `cancel run` | lets the turn end |
+
+Pending is a gate result, not a run status. While a command gate is pending the
+run stays `running`, the stop hook lets the turn end, and the next stop checks
+again without spending an attempt.
 
 A checkpoint with `skills` gets a `skills` gate: in Claude Code, a subagent
 must have loaded each one with the Skill tool during that checkpoint.

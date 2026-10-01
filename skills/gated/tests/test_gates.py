@@ -27,6 +27,18 @@ class CommandGateTest(GatedCase):
         self.assertIn("exited 3", r["summary"])
         self.assertIn("boom", r["log"])
 
+    def test_pending_exit_is_a_pending_result(self):
+        r, _ = gate_result(self, {"id": "ci", "type": "command", "run": "exit 75", "pendingExit": 75})
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["pending"])
+        self.assertEqual(r["summary"], "`exit 75` says not decided yet (exit 75)")
+
+    def test_exit_75_without_pending_setting_is_failure(self):
+        r, _ = gate_result(self, {"id": "ci", "type": "command", "run": "exit 75"})
+        self.assertFalse(r["ok"])
+        self.assertNotIn("pending", r)
+        self.assertIn("exited 75", r["summary"])
+
     def test_timeout(self):
         r, _ = gate_result(self, {"id": "t", "type": "command", "run": "sleep 5", "timeout": 1})
         self.assertFalse(r["ok"])

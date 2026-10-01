@@ -25,6 +25,16 @@ class LintTest(GatedCase):
         wdir = self.workflow("w", data, files)
         return lint_workflow(json.loads((wdir / "workflow.json").read_text()), wdir)
 
+    def test_command_pending_fields_are_validated_and_command_only(self):
+        bad_command = {"id": "ci", "type": "command", "run": "ci", "pendingExit": 126, "pendingMax": 0}
+        bad_file = {"id": "f", "type": "file", "path": "x", "pendingExit": 75}
+        errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [bad_command, bad_file]}]},
+                           {"a.md": "x"})
+        joined = "\n".join(errors)
+        self.assertIn("pendingExit must be an integer from 1 to 255 except 126 and 127", joined)
+        self.assertIn("pendingMax must be a number greater than 0", joined)
+        self.assertIn("only allowed on command gates", joined)
+
     def test_valid_fixed_workflow(self):
         self.assertEqual(self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [
             {"id": "t", "type": "command", "run": "true"}]}]}, {"a.md": "x"}), [])

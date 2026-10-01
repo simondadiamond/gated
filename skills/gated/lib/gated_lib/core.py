@@ -171,6 +171,19 @@ def lint_gate(gate: Any, where: str, wdir: Optional[Path], errors: List[str]) ->
     for key in need.get(kind, []):
         if key not in gate:
             errors.append(f"{where}: {kind} gate '{gid}' needs '{key}'")
+    if kind != "command" and ("pendingExit" in gate or "pendingMax" in gate):
+        errors.append(f"{where}: gate '{gid}' pendingExit and pendingMax are only allowed on command gates")
+    if kind == "command":
+        pending_exit = gate.get("pendingExit")
+        if "pendingExit" in gate and not (
+            type(pending_exit) is int and 1 <= pending_exit <= 255 and pending_exit not in (126, 127)
+        ):
+            errors.append(f"{where}: command gate '{gid}' pendingExit must be an integer from 1 to 255 except 126 and 127")
+        pending_max = gate.get("pendingMax")
+        if "pendingMax" in gate and not (
+            not isinstance(pending_max, bool) and isinstance(pending_max, (int, float)) and pending_max > 0
+        ):
+            errors.append(f"{where}: command gate '{gid}' pendingMax must be a number greater than 0")
     if kind == "red-first" and "lock" in gate and not (
         isinstance(gate["lock"], list) and gate["lock"] and all(isinstance(g, str) for g in gate["lock"])
     ):
