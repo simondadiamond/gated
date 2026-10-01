@@ -47,6 +47,78 @@ class FixedRunTest(GatedCase):
         self.assertEqual(run.state["attempts"], {})
         self.assertEqual(run.status, "running")
 
+    def test_pending_gate_allows_stop_without_spending_attempt(self):
+        self.simple_workflow([{"id": "ci", "type": "command", "run": "exit 75", "pendingExit": 75}])
+        run = self.start()
+        self.todos_done(run)
+        may_stop, message = runner.check(run, count_attempts=True)
+        self.assertTrue(may_stop)
+        self.assertIn("Waiting on outside systems", message)
+        self.assertIn("No attempt spent", message)
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.state["attempts"], {})
+        self.assertIn("one/ci", run.state["pendingSince"])
+        self.assertIn("one/ci", self.gated("status")[1])
+        report = runner.write_report(run).read_text()
+        self.assertIn("one/ci", report)
+        self.assertIn("PENDING ci", report)
+
+    def test_expired_pending_gate_becomes_failure_and_spends_attempt(self):
+        self.simple_workflow([{"id": "ci", "type": "command", "run": "exit 75",
+                               "pendingExit": 75, "pendingMax": 1}])
+        run = self.start()
+        self.todos_done(run)
+        run.state["pendingSince"] = {"one/ci": "2000-01-01T00:00:00Z"}
+        run.save()
+        may_stop, message = runner.check(run, count_attempts=True)
+        self.assertFalse(may_stop)
+        self.assertIn("still pending after 1s", message)
+        self.assertEqual(run.state["attempts"]["one/ci"], 1)
+
+    def test_non_pending_failure_still_spends_attempt(self):
+        self.simple_workflow([{"id": "ci", "type": "command", "run": "exit 2", "pendingExit": 75}])
+        run = self.start()
+        self.todos_done(run)
+        runner.check(run, count_attempts=True)
+        self.assertEqual(run.state["attempts"]["one/ci"], 1)
+
+    def test_pending_with_failure_counts_only_failure(self):
+        self.simple_workflow([
+            {"id": "ci", "type": "command", "run": "exit 75", "pendingExit": 75},
+            {"id": "tests", "type": "command", "run": "exit 1"},
+        ])
+        run = self.start()
+        self.todos_done(run)
+        may_stop, message = runner.check(run, count_attempts=True)
+        self.assertFalse(may_stop)
+        self.assertIn("tests", message)
+        self.assertEqual(run.state["attempts"], {"one/tests": 1})
+        self.assertIn("one/ci", run.state["pendingSince"])
+
+    def test_advisory_check_reports_pending_separately_without_state_change(self):
+        self.simple_workflow([
+            {"id": "ci", "type": "command", "run": "exit 75", "pendingExit": 75},
+            {"id": "tests", "type": "command", "run": "exit 1"},
+        ])
+        run = self.start()
+        before = (run.dir / "state.json").read_bytes()
+        may_stop, message = runner.check(run, move=False)
+        self.assertFalse(may_stop)
+        self.assertIn("Pending gates:", message)
+        self.assertIn("Failing gates:", message)
+        self.assertEqual((run.dir / "state.json").read_bytes(), before)
+
+    def test_pending_since_is_cleared_when_gate_passes(self):
+        self.simple_workflow([{"id": "ci", "type": "command",
+                               "run": "test -f ready || exit 75", "pendingExit": 75}])
+        run = self.start()
+        self.todos_done(run)
+        runner.check(run, count_attempts=True)
+        self.assertIn("one/ci", run.state["pendingSince"])
+        (self.project / "ready").write_text("yes")
+        runner.check(run, count_attempts=True)
+        self.assertNotIn("one/ci", run.state.get("pendingSince", {}))
+
     def test_budget_blocks_without_skipping(self):
         self.simple_workflow([{"id": "t", "type": "command", "run": "false"}], attempts=3)
         run = self.start()

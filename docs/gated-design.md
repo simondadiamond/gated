@@ -113,6 +113,12 @@ Templates available in gates and steps: `{{run}}` (the run folder),
 | `human` | you typed `approve` as the whole message |
 | `fresh-context` | added to every checkpoint: a new subagent did the work and the orchestrator edited nothing |
 
+A `command` gate can reserve an exit code for pending work in an outside
+system, such as CI. Pending is a gate result, not a run status: the run remains
+`running`, no attempt is spent, and a later stop checks again. After the gate's
+pending time limit it becomes a normal failure. Another turn must occur for a
+recheck, from the person, a scheduled resume or a background wait finishing.
+
 The runner adds a `todos` gate to every checkpoint. Each checkpoint starts
 with the agent writing `{{run}}/<checkpoint>/todo.md`, and it can't finish
 with an unchecked item.

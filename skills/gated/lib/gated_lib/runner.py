@@ -554,19 +554,69 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     if changed:
         results.append({"id": "locks", "type": "locks", "ok": False, "at": now(), "log": "",
                         "summary": "locked files changed since they were locked: " + ", ".join(changed)})
+    gate_by_id = {g["id"]: g for g in cp["gates"]}
+    checked_at = now()
+    pending_since = run.state.setdefault("pendingSince", {}) if move else dict(run.state.get("pendingSince", {}))
+    pending = []
+    pending_keys = set()
+    for r in results:
+        if not r.get("pending"):
+            continue
+        key = f"{cp['id']}/{r['id']}"
+        since = pending_since.get(key, checked_at)
+        maximum = gate_by_id.get(r["id"], {}).get("pendingMax", 21600)
+        try:
+            start = datetime.datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            current = datetime.datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            expired = (current - start).total_seconds() > maximum
+        except (TypeError, ValueError):
+            since, expired = checked_at, False
+        if expired:
+            r.pop("pending", None)
+            r["summary"] = f"still pending after {maximum}s: {r['summary']}"
+        else:
+            pending_since[key] = since
+            pending_keys.add(key)
+            r["since"] = since
+            pending.append(r)
+    if move:
+        prefix = cp["id"] + "/"
+        for key in list(pending_since):
+            if key.startswith(prefix) and key not in pending_keys:
+                del pending_since[key]
     for r in results:
         write_log(run, cp, r)
-    failing = [r for r in results if not r["ok"] and r["type"] != "human"]
+    failing = [r for r in results if not r["ok"] and r["type"] != "human" and not r.get("pending")]
     human = [r for r in results if not r["ok"] and r["type"] == "human"]
     if not move:
+        sections = []
         if failing:
             lines = "\n".join(f"- {r['id']} ({r['type']}): {r['summary']}" for r in failing)
-            return False, f"Checkpoint '{cp['id']}' isn't done. Failing gates:\n{lines}\n\nFull logs: {run.dir / cp['id'] / 'gates'}"
+            sections.append(f"Failing gates:\n{lines}")
+        if pending:
+            lines = "\n".join(f"- {r['id']} ({r['type']}): {r['summary']}" for r in pending)
+            sections.append(f"Pending gates:\n{lines}")
+        if sections:
+            return not failing, (f"Checkpoint '{cp['id']}' isn't done. " + "\n\n".join(sections)
+                                 + f"\n\nFull logs: {run.dir / cp['id'] / 'gates'}")
         if human:
             return True, f"Checkpoint '{cp['id']}' passes its checks. End your turn: the stop hook confirms, then the person is asked."
         return True, (f"Every gate on '{cp['id']}' passes. End your turn: the stop hook reruns the gates and moves "
                       "the run on. Only the hook can advance a run.")
-    run.state["last"][cp["id"]] = [{k: r[k] for k in ("id", "type", "ok", "summary", "at")} for r in results]
+    last_results = []
+    for r in results:
+        saved = {k: r[k] for k in ("id", "type", "ok", "summary", "at")}
+        if r.get("pending"):
+            saved.update({"pending": True, "since": r["since"]})
+        last_results.append(saved)
+    run.state["last"][cp["id"]] = last_results
+    if pending and not failing:
+        run.state["status"] = "running"
+        run.save()
+        details = "; ".join(f"{r['id']}: {r['summary']} (pending since {r['since']})" for r in pending)
+        return True, ("Waiting on outside systems: " + details + ". No attempt spent. The next stop rechecks; "
+                      "something has to give the agent a turn (the person, a scheduled `claude -p` resume, or a "
+                      "background wait finishing).")
     if not failing and not human:
         message = advance(run)
         run.save()
@@ -716,12 +766,20 @@ def write_report(run: Run) -> Path:
         lines += ["", "## Blocked", "", "These gates used every attempt. None was skipped. Fix what they report, "
                   "then `gated resume` to continue with fresh attempts.", ""]
         lines += [f"- {k}" for k in s["blockedOn"]]
+    if s.get("pendingSince"):
+        lines += ["", "## Pending outside systems", ""]
+        for key, since in sorted(s["pendingSince"].items()):
+            cp_id, gate_id = key.split("/", 1)
+            last = next((r for r in s.get("last", {}).get(cp_id, []) if r["id"] == gate_id), None)
+            summary = f": {last['summary']}" if last else ""
+            lines.append(f"- {key} since {since}{summary}")
     lines += ["", "## Checkpoints", ""]
     for cp in s["checkpoints"]:
         lines.append(f"### {cp['title']} [{cp['id']}]: {cp['status']}")
         for r in s.get("last", {}).get(cp["id"], []):
             used = s["attempts"].get(f"{cp['id']}/{r['id']}")
-            lines.append(f"- {'PASS' if r['ok'] else 'FAIL'} {r['id']} ({r['type']}): {r['summary']}" + (f"  [attempts: {used}]" if used else ""))
+            verdict = "PENDING" if r.get("pending") else ("PASS" if r["ok"] else "FAIL")
+            lines.append(f"- {verdict} {r['id']} ({r['type']}): {r['summary']}" + (f"  [attempts: {used}]" if used else ""))
         lines.append("")
     if s.get("splits"):
         lines += ["## Split into new stories", ""] + [

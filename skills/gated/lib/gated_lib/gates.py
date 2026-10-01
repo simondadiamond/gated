@@ -63,6 +63,10 @@ def check_command(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[st
     code, out = sh(cmd, run.project, gate.get("timeout", 600), env=gate_env(run, cp))
     if code is None:
         return result(gate, False, "timed out", out)
+    if gate.get("pendingExit") == code:
+        pending = result(gate, False, f"`{cmd}` says not decided yet (exit {code})", out)
+        pending["pending"] = True
+        return pending
     return result(gate, code == 0, f"`{cmd}` exited {code}", out)
 
 
