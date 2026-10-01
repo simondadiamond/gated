@@ -43,7 +43,6 @@ Run `gated lint <name>` after every change.
 | `inputs` | Values passed as `key=value` when the run starts. `required` or `default`. |
 | `attempts` | How many failed stop attempts a gate gets before the run is `blocked`. Default 5. A gate can set its own. |
 | `commit` | `true` commits the project once per passed checkpoint. For code workflows. |
-| `commitMessage` | A non-empty commit message template. Defaults to `gated(<run>): <title>` plus the checkpoint and passed gate ids. |
 | `freshContext` | `false` turns off the fresh-subagent rule. Default `true`. |
 | `skills` | Skills every checkpoint's subagent must load. A checkpoint can list its own `skills` too. |
 | `storySkill` | The skill a step uses to create a new story when it splits work off. Default: `gh issue create`. |
@@ -74,16 +73,10 @@ These work in step files, gate commands, paths and rubrics:
 | `{{project}}` | the project root |
 | `{{workflow}}` | the workflow folder, for bundled scripts |
 | `{{checkpoint}}` | the current checkpoint id |
-| `{{checkpoint.title}}` | the current checkpoint title, in `commitMessage` only |
 | `{{input.<name>}}` | an input value |
 
-An unknown commit message template fails workflow validation. Other unknown
-templates fail the gate that uses them. A template never quietly becomes an
-empty string. For example,
-`"commitMessage": "ship {{checkpoint.title}} [{{checkpoint}}]"` uses the title
-and id. Without `commitMessage`, checkpoint commits remain:
-`gated(<run>): <title>`, a blank line, then
-`Checkpoint '<id>' passed: <gate ids>`.
+An unknown template fails the gate that uses it. It never quietly becomes an
+empty string.
 
 ## A planned run's checkpoints
 
