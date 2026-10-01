@@ -173,19 +173,38 @@ def judge_command(run: Run) -> Tuple[str, List[str]]:
     return "claude", ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config"]
 
 
+def clip(text: str, limit: int) -> Tuple[str, int]:
+    """Keep both ends of an input and make middle truncation visible."""
+    if len(text) <= limit:
+        return text, 0
+    cut = len(text) - limit
+    first = limit // 2
+    marker = f"\n[gated: {cut} characters cut from the middle of this input]\n"
+    return text[:first] + marker + text[-(limit - first):], cut
+
+
 def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str, Any]:
     ctx = run.ctx(cp)
     rubric = render((run.workflow_dir / gate["rubric"]).read_text(), ctx) if (run.workflow_dir / gate["rubric"]).is_file() else render(gate["rubric"], ctx)
     parts = [JUDGE_PREAMBLE, "## Rubric\n", rubric, "\n## Inputs\n"]
+    cuts = []
     for inp in gate.get("inputs", []):
+        limit = inp.get("maxChars", gate.get("maxChars", 200000))
         if "run" in inp:
             cmd = render(inp["run"], ctx)
-            _, out = sh(cmd, run.project, 120, env=gate_env(run, cp))
-            parts.append(f"### Output of `{cmd}`\n```\n{out[-60000:]}\n```\n")
+            _, raw = sh(cmd, run.project, 120, env=gate_env(run, cp))
+            out, cut = clip(raw, limit)
+            label = cmd
+            parts.append(f"### Output of `{cmd}`\n```\n{out}\n```\n")
         else:
             p = resolve_path(run, inp["file"], cp)
-            body = p.read_text(errors="replace")[-60000:] if p.is_file() else "(file does not exist)"
+            raw = p.read_text(errors="replace") if p.is_file() else "(file does not exist)"
+            body, cut = clip(raw, limit)
+            label = str(p)
             parts.append(f"### {p}\n```\n{body}\n```\n")
+        if cut:
+            cuts.append(f"{label} by {cut} chars")
+    cut_suffix = " (cut: " + "; ".join(cuts) + ")" if cuts else ""
     prompt = "\n".join(parts)
     key = f"{cp['id']}/{gate['id']}"
     digest = sha256_text(prompt)
@@ -200,14 +219,14 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
         p = subprocess.run(argv, cwd=str(run.project), input=prompt, capture_output=True, text=True, timeout=gate.get("timeout", 900), env=env)
         out = (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
-        return result(gate, False, f"the {kind} judge timed out")
+        return result(gate, False, f"the {kind} judge timed out" + cut_suffix)
     except FileNotFoundError:
-        return result(gate, False, f"can't run the judge: `{argv[0]}` is not installed")
+        return result(gate, False, f"can't run the judge: `{argv[0]}` is not installed" + cut_suffix)
     verdicts = VERDICT_RE.findall(out)
     if not verdicts:
-        return result(gate, False, f"the {kind} judge gave no VERDICT line", out)
+        return result(gate, False, f"the {kind} judge gave no VERDICT line" + cut_suffix, out)
     ok = verdicts[-1].upper() == "PASS"
-    summary = f"{kind} judge: {'PASS' if ok else 'FAIL'}"
+    summary = f"{kind} judge: {'PASS' if ok else 'FAIL'}" + cut_suffix
     run.state["judgeCache"][key] = {"hash": digest, "ok": ok, "summary": summary, "log": out[-LOG_TAIL:]}
     return result(gate, ok, summary, out)
 
