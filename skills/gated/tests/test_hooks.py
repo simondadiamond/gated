@@ -155,6 +155,20 @@ class PreToolTest(GatedCase):
         self.assertEqual(self.pre("Bash", {"command": "python3 gated status > /tmp/x; gated check"})[0], 0)
 
 
+class PromptApprovalTest(GatedCase):
+    def test_bare_yes_does_not_approve_but_approve_does(self):
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "plan"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "build", "instructions": "build", "gates": []}
+        ]}))
+        self.submit_plan()
+        self.hook("prompt", {"session_id": "owner", "prompt": "yes"})
+        self.assertEqual(self.run_obj().status, "awaiting-approval")
+        self.hook("prompt", {"session_id": "owner", "prompt": "approve"})
+        self.assertEqual(self.run_obj().status, "running")
+
+
 class InstallTest(GatedCase):
     def test_codex_install_is_idempotent_and_keeps_other_hooks(self):
         path = self.home / ".codex" / "hooks.json"

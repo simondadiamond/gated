@@ -16,8 +16,8 @@ from typing import Any, Dict, Iterable, List, Optional
 from . import runner
 from .core import FINISHED_STATUSES, SKILL_DIR, Run, locked, now, owned_run, record_owner, session_run_dir, take_claim
 
-# The whole message has to be the word, so "go ahead and change step 2" is feedback, not approval.
-APPROVE_RE = re.compile(r"^\s*(approve|approved|lgtm|ship it|yes)\s*[.!]*\s*$", re.IGNORECASE)
+# The whole message must be an explicit approval, so a conversational "yes" or feedback is not approval.
+APPROVE_RE = re.compile(r"^\s*(approve|approved|lgtm|ship it)\s*[.!]*\s*$", re.IGNORECASE)
 REJECT_RE = re.compile(r"^\s*reject\b", re.IGNORECASE)
 CANCEL_RE = re.compile(r"^\s*cancel run\s*[.!]*\s*$", re.IGNORECASE)
 CLAIM_RE = re.compile(r"gated-claim:([0-9a-f]{16})")
