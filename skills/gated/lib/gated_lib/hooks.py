@@ -73,9 +73,18 @@ def names_file(segment: str, name: str) -> bool:
     return re.search(r"(?:^|[\s/\"'=])" + re.escape(name) + r"(?:$|[\s\"';|&)>])", segment) is not None
 
 
+# Saving `gated step` to a temp folder or the run folder (the step's own workspace) to hand it on
+# isn't the orchestrator doing the work. Only edits_files() skips these: guard() still sees them,
+# so the run folder's protected files stay denied by name. A path with `..` could leave the
+# folder, and one with quotes or `$(` mid-path can't be read safely, so neither is skipped.
+_PATH_CHAR = r"(?:(?!\.\.)[^\s;&|<>\"'`$()])"
+_SCRATCH_PATH = r"(?:(?:/(?:private/)?tmp|\$\{?TMPDIR\}?)/|(?:" + _PATH_CHAR + r"*/)?\.gated/runs/)" + _PATH_CHAR + "*"
+SCRATCH_REDIRECT_RE = re.compile(r"\d*>>?\s*(?:\"" + _SCRATCH_PATH + r"\"|" + _SCRATCH_PATH + r"(?=[\s;&|)]|$))")
+
+
 def edits_files(command: str) -> bool:
     for segment in SEGMENT_RE.split(command):
-        if segment.strip() and not is_gated_call(segment) and EDIT_HINT_RE.search(unquoted(segment)):
+        if segment.strip() and not is_gated_call(segment) and EDIT_HINT_RE.search(unquoted(SCRATCH_REDIRECT_RE.sub("", segment))):
             return True
     return False
 
