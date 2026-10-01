@@ -144,6 +144,15 @@ class RedFirstTest(GatedCase):
 
 
 class JudgeTest(GatedCase):
+    def test_claude_judge_has_no_tools_or_mcp_servers(self):
+        self.simple_workflow([])
+        run = self.start()
+        kind, argv = G.judge_command(run)
+        self.assertEqual(kind, "claude")
+        tools = argv.index("--tools")
+        self.assertEqual(argv[tools + 1], "")
+        self.assertIn("--strict-mcp-config", argv)
+
     def judge(self, script, rubric="Must mention cats."):
         import os
         os.environ["GATED_JUDGE_CMD"] = script
