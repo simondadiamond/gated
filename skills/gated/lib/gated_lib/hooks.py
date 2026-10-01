@@ -26,9 +26,7 @@ PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* M
 WRITE_HINT_RE = re.compile(r"(>|\btee\b|\bsed\b|\brm\b|\bmv\b|\bcp\b|\bln\b|\btruncate\b|\bdd\b|\bchmod\b|\binstall\b"
                            r"|\b(?:python3?|perl|node|ruby)\b[^|;&]*\s-(?:c|e|i|pi)\b|\bgit\s+(checkout|restore|stash|reset)\b)")
 GATED_CALL_RE = re.compile(r"""^\s*(?:python3\s+)?["']?[^\s"';&|]*\bgated["']?\s+[a-z-]+\b""")
-# A redirect into /dev/null or a temp folder writes nothing in the project: saving `gated step`
-# to /tmp to hand it on isn't the orchestrator doing the work.
-HARMLESS_REDIRECT_RE = re.compile(r"\d*>&\d|\d*>>?\s*(?:/dev/null|/(?:private/)?tmp/[^\s;&|]*|\$\{?TMPDIR\}?/[^\s;&|]*)")
+HARMLESS_REDIRECT_RE = re.compile(r"\d*>&\d|\d*>\s*/dev/null")
 # A '>' inside quotes is an argument, not a redirect: `gh pr list --search "merged:>=2026-09-23"`.
 QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 
@@ -75,14 +73,18 @@ def names_file(segment: str, name: str) -> bool:
     return re.search(r"(?:^|[\s/\"'=])" + re.escape(name) + r"(?:$|[\s\"';|&)>])", segment) is not None
 
 
-# The run folder is the step's own workspace (briefs, to-dos, notes), not checkpoint work. Its
-# protected files are guarded separately, by name.
-RUN_FOLDER_REDIRECT_RE = re.compile(r"\d*>>?\s*[^\s;&|]*\.gated/runs/[^\s;&|]*")
+# Saving `gated step` to a temp folder or the run folder (the step's own workspace) to hand it on
+# isn't the orchestrator doing the work. Only edits_files() skips these: guard() still sees them,
+# so the run folder's protected files stay denied by name. A path with `..` could leave the
+# folder, and one with quotes or `$(` mid-path can't be read safely, so neither is skipped.
+_PATH_CHAR = r"(?:(?!\.\.)[^\s;&|<>\"'`$()])"
+_SCRATCH_PATH = r"(?:(?:/(?:private/)?tmp|\$\{?TMPDIR\}?)/|(?:" + _PATH_CHAR + r"*/)?\.gated/runs/)" + _PATH_CHAR + "*"
+SCRATCH_REDIRECT_RE = re.compile(r"\d*>>?\s*(?:\"" + _SCRATCH_PATH + r"\"|" + _SCRATCH_PATH + r"(?=[\s;&|)]|$))")
 
 
 def edits_files(command: str) -> bool:
     for segment in SEGMENT_RE.split(command):
-        if segment.strip() and not is_gated_call(segment) and EDIT_HINT_RE.search(RUN_FOLDER_REDIRECT_RE.sub("", unquoted(segment))):
+        if segment.strip() and not is_gated_call(segment) and EDIT_HINT_RE.search(unquoted(SCRATCH_REDIRECT_RE.sub("", segment))):
             return True
     return False
 

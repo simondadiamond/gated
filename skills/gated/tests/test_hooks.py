@@ -137,6 +137,7 @@ class PreToolTest(GatedCase):
         _, out, _ = self.pre("Bash", {"command": f'python3 "{cli}" step'})
         self.assertIn('"permissionDecision": "allow"', out)
         self.assertEqual(self.pre("Bash", {"command": f'python3 "{cli}" step; rm -rf x'})[1], "")
+        self.assertEqual(self.pre("Bash", {"command": f'python3 "{cli}" step > /tmp/brief.md'})[1], "")
         self.assertFalse(is_own_cli("python3 /tmp/elsewhere/gated step"))
         self.assertTrue(is_own_cli(f"{cli} check"))
 
@@ -159,6 +160,27 @@ class PreToolTest(GatedCase):
         # Same day: `gated step > .gated/runs/<id>/brief.md`, the step's own workspace.
         self.assertFalse(edits_files("python3 bin/gated step > .gated/runs/story-1/brief.md"))
         self.assertTrue(edits_files("gated step > .gated/brief.md"))
+        # Quotes and stderr redirects, the same as bare paths.
+        self.assertFalse(edits_files('gated step > "$TMPDIR/brief.md"'))
+        self.assertFalse(edits_files('gated step > ".gated/runs/story-1/brief.md"'))
+        self.assertFalse(edits_files("gated step 2>/tmp/err.log"))
+        # A path that leaves the folder, or can't be read safely, is still an edit.
+        self.assertTrue(edits_files("echo x > /tmp/../repo/src/a.ts"))
+        self.assertTrue(edits_files("echo x > .gated/runs/r/../../../src/a.ts"))
+        self.assertTrue(edits_files("echo x > ../../.gated/runs/r/a.md"))
+        self.assertTrue(edits_files("echo x > /tmp/$(cp a src/b)"))
+        self.assertTrue(edits_files("echo x > /tmpfoo/a"))
+
+    def test_saved_brief_logs_no_edit(self):
+        self.assertEqual(self.pre("Bash", {"command": "python3 bin/gated step > /tmp/brief.md"})[0], 0)
+        row = json.loads((self.run.dir / "activity.jsonl").read_text().splitlines()[-1])
+        self.assertFalse(row["edit"])
+
+    def test_temp_and_run_folder_redirects_are_still_guarded(self):
+        # The edit exemption must not reach guard(): a lock or the run state stays denied by name.
+        self.assertEqual(self.pre("Bash", {"command": f"echo x > /tmp/..{self.locked}"})[0], 2)
+        self.assertEqual(self.pre("Bash", {"command": f"gated step > {self.run.dir}/state.json"})[0], 2)
+        self.assertEqual(self.pre("Bash", {"command": f"gated step > {self.run.dir}/brief.md"})[0], 0)
 
     def test_shell_writes_to_locked_file(self):
         self.assertEqual(self.pre("Bash", {"command": f"echo x > {self.locked}"})[0], 2)
