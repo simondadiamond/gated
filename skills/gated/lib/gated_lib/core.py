@@ -258,6 +258,18 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
     for key in ("storySkill", "basedOn"):
         if key in data and not (isinstance(data[key], str) and data[key].strip()):
             errors.append(f"'{key}' must be a non-empty string")
+    if "commitMessage" in data:
+        message = data["commitMessage"]
+        if not (isinstance(message, str) and message.strip()):
+            errors.append("'commitMessage' must be a non-empty string")
+        else:
+            template_ctx = {"run": "/run", "project": "/project", "workflow": "/workflow",
+                            "checkpoint": "step", "checkpoint.title": "Step title",
+                            "input": {name: "value" for name in inputs} if isinstance(inputs, dict) else {}}
+            try:
+                render(message, template_ctx)
+            except GatedError as e:
+                errors.append(f"'commitMessage' has an {e}")
     if "freshContext" in data and not isinstance(data["freshContext"], bool):
         errors.append("'freshContext' must be true or false")
     if "judge" in data and data["judge"] not in ("claude", "codex"):

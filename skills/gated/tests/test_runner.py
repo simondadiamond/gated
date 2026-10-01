@@ -199,10 +199,25 @@ class FixedRunTest(GatedCase):
         (self.project / "feature.txt").write_text("x")
         may_stop, msg = runner.check(run)
         self.assertIn("committed", msg)
-        log = subprocess.run(["git", "log", "--format=%s", "-1"], cwd=str(self.project), capture_output=True, text=True).stdout
-        self.assertIn("gated(demo-1)", log)
+        body = subprocess.run(["git", "log", "--format=%B", "-1"], cwd=str(self.project),
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(body, "gated(demo-1): one\n\nCheckpoint 'one' passed: t, todos, fresh-context")
         files = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"], cwd=str(self.project), capture_output=True, text=True).stdout
         self.assertNotIn(".gated", files)
+
+    def test_commit_message_template_renders_checkpoint_title_and_id(self):
+        self.git_init()
+        self.workflow("demo", {"commit": True,
+                               "commitMessage": "ship {{checkpoint.title}} [{{checkpoint}}] for {{run}}",
+                               "checkpoints": [{"id": "one", "title": "First thing", "step": "s.md", "gates": []}]},
+                      {"s.md": "x"})
+        run = self.start()
+        self.todos_done(run)
+        (self.project / "feature.txt").write_text("x")
+        runner.check(run)
+        subject = subprocess.run(["git", "log", "--format=%s", "-1"], cwd=str(self.project),
+                                 capture_output=True, text=True).stdout.strip()
+        self.assertEqual(subject, f"ship First thing [one] for {run.dir}")
 
     def test_step_brief_lists_gates_and_learnings(self):
         wdir = self.simple_workflow([{"id": "t", "type": "command", "run": "npm test"}])

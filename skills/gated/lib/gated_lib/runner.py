@@ -353,7 +353,13 @@ def commit_checkpoint(run: Run, cp: Dict[str, Any]) -> str:
     subprocess.run(git + ["add", "-A", "--", ".", ":(exclude).gated"], capture_output=True, text=True)
     if subprocess.run(git + ["diff", "--cached", "--quiet"]).returncode == 0:
         return "nothing to commit"
-    msg = f"gated({run.id}): {cp['title']}\n\nCheckpoint '{cp['id']}' passed: " + ", ".join(g["id"] for g in cp["gates"])
+    ctx = run.ctx(cp)
+    ctx["checkpoint.title"] = cp["title"]
+    template = run.workflow().get("commitMessage")
+    msg = render(template, ctx) if template is not None else (
+        f"gated({run.id}): {cp['title']}\n\nCheckpoint '{cp['id']}' passed: "
+        + ", ".join(g["id"] for g in cp["gates"])
+    )
     p = subprocess.run(git + ["commit", "-q", "-m", msg], capture_output=True, text=True)
     if p.returncode != 0:
         return f"commit failed: {(p.stdout + p.stderr).strip()[-300:]}"

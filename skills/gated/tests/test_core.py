@@ -25,6 +25,13 @@ class LintTest(GatedCase):
         wdir = self.workflow("w", data, files)
         return lint_workflow(json.loads((wdir / "workflow.json").read_text()), wdir)
 
+    def test_commit_message_must_be_nonempty_and_use_known_templates(self):
+        base = {"checkpoints": [{"id": "a", "step": "a.md", "gates": []}]}
+        empty = self.lint({**base, "commitMessage": "  "}, {"a.md": "x"})
+        unknown = self.lint({**base, "commitMessage": "ship {{mystery}}"}, {"a.md": "x"})
+        self.assertTrue(any("commitMessage" in e and "non-empty" in e for e in empty), empty)
+        self.assertTrue(any("commitMessage" in e and "unknown template" in e for e in unknown), unknown)
+
     def test_command_pending_fields_are_validated_and_command_only(self):
         bad_command = {"id": "ci", "type": "command", "run": "ci", "pendingExit": 126, "pendingMax": 0}
         bad_file = {"id": "f", "type": "file", "path": "x", "pendingExit": 75}
