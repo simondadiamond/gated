@@ -42,6 +42,17 @@ class LintTest(GatedCase):
         self.assertIn("needs 'run'", joined)
         self.assertIn("non-empty list of globs", joined)
 
+    def test_plan_judge_requires_rubric_and_known_approval(self):
+        missing = self.lint({"plan": {"step": "p.md", "approval": "judge"}}, {"p.md": "x"})
+        unknown = self.lint({"plan": {"step": "p.md", "approval": "robot"}}, {"p.md": "x"})
+        self.assertTrue(any("requires 'rubric'" in e for e in missing), missing)
+        self.assertTrue(any("approval" in e and "human" in e and "judge" in e for e in unknown), unknown)
+
+    def test_plan_judge_accepts_inline_rubric_and_judge_inputs(self):
+        errors = self.lint({"plan": {"step": "p.md", "approval": "judge", "rubric": "Check every item.",
+                                            "inputs": [{"run": "git diff", "maxChars": 1000}]}}, {"p.md": "x"})
+        self.assertEqual(errors, [])
+
     def test_judge_max_chars_must_be_at_least_1000(self):
         gates = [
             {"id": "gate-limit", "type": "judge", "rubric": "rubric.md", "maxChars": 999},

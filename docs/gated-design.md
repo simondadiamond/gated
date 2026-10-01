@@ -95,7 +95,8 @@ Checkpoints come in two kinds:
   run on a schedule.
 - **Planned.** The workflow has a `plan` step instead of a checkpoint list. A
   planning subagent writes `checkpoints.json` for this run, including each
-  checkpoint's gates. You approve it once, and then it is locked.
+  checkpoint's gates. Plan approval is human by default, after which the plan
+  is locked.
 
 Templates available in gates and steps: `{{run}}` (the run folder),
 `{{project}}`, and `{{input.<name>}}`.
@@ -127,6 +128,14 @@ tests.
 A `judge` verdict is cached against a hash of its inputs, so an unchanged diff
 isn't judged twice. A Claude judge runs with built-in tools and MCP servers
 disabled.
+
+## Plan approval
+
+Plan approval defaults to a person. A workflow can opt into judge approval for
+unattended planned runs by giving its `plan` a rubric. A rejected plan returns
+to a fresh planning subagent, while a passing plan starts its first checkpoint.
+The person can still approve or cancel at any time, and amendments always need
+a person. The trade-off of judge approval is that nobody reads the plan.
 
 A `human` gate reads your messages through a `UserPromptSubmit` hook, which
 sees what you typed, not what the agent says you typed. In a scheduled run a
@@ -208,8 +217,9 @@ not the agent's shell.
   never advances a run, spends an attempt or caches a judge verdict. A
   variable or a fake `PATH` in the agent's shell can't pass anything.
 - **The Stop hook** reruns the gates, advances, counts attempts and blocks.
-- **Only the person** can approve a plan or a human gate, grant fresh
-  attempts, reject an amendment or cancel a run. They type the whole message:
+- **Only the person or an opted-in plan judge** can approve a plan. Only the
+  person can approve a human gate, grant fresh attempts, reject an amendment or
+  cancel a run. They type the whole message:
   `approve` (also `lgtm`, `yes`, `ship it`), `reject ...` or `cancel run`.
   "Go ahead and change step 2" is feedback, not approval.
 
