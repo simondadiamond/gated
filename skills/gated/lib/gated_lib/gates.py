@@ -169,7 +169,8 @@ def judge_command(run: Run) -> Tuple[str, List[str]]:
     harness = run.workflow().get("judge") or run.state.get("harness") or "claude"
     if harness == "codex":
         return "codex", ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "-"]
-    return "claude", ["claude", "-p", "--output-format", "text"]
+    # --tools "" removes built-in tools only; MCP servers stay unless --strict-mcp-config.
+    return "claude", ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config"]
 
 
 def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str, Any]:

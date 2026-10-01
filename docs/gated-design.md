@@ -125,7 +125,8 @@ gate's `lock` globs, so an edited test fails the gate. Put test configuration
 tests.
 
 A `judge` verdict is cached against a hash of its inputs, so an unchanged diff
-isn't judged twice.
+isn't judged twice. A Claude judge runs with built-in tools and MCP servers
+disabled.
 
 A `human` gate reads your messages through a `UserPromptSubmit` hook, which
 sees what you typed, not what the agent says you typed. In a scheduled run a
