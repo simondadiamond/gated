@@ -226,7 +226,7 @@ not the agent's shell.
 - **Only the person or an opted-in plan judge** can approve a plan. Only the
   person can approve a human gate, grant fresh attempts, reject an amendment or
   cancel a run. They type the whole message:
-  `approve` (also `lgtm`, `yes`, `ship it`), `reject ...` or `cancel run`.
+  `approve` (also `approved`, `lgtm`, `ship it`), `reject ...` or `cancel run`.
   "Go ahead and change step 2" is feedback, not approval.
 
 The hooks find the run through `~/.gated/sessions/`, an index written when the
