@@ -49,7 +49,7 @@ Run `gated lint <name>` after every change.
 | `basedOn` | Set by `gated customize`: which workflow this copy came from. |
 | `judge` | `claude` or `codex`: which CLI grades `judge` gates. Defaults to the harness running the workflow. |
 | `before` | Fixed checkpoints that run ahead of the `plan`, like writing acceptance criteria. Needs a `plan`. |
-| `plan` | A planning step. Its subagent writes this run's checkpoints, and the person approves them. It can list `skills` for the planner. |
+| `plan` | A planning step. Its subagent writes this run's checkpoints. `approval` defaults to `human`; set it to `judge` with a `rubric` for unattended review. It can list `skills` for the planner. |
 | `every` | Gates added to every checkpoint, planned or fixed. A test suite usually goes here. |
 | `checkpoints` | Fixed checkpoints. With a `plan`, they run after the planned ones. |
 
@@ -99,8 +99,37 @@ A planner writes `{{run}}/checkpoints.json`:
 
 Planned checkpoints hold `instructions` text instead of a `step` file. `gated
 submit-plan` validates them, snapshots the file as `plan-<n>.json`, locks the
-snapshot and waits for approval. `gated amend <file>` adds checkpoints in the
-same shape to a running or finished run, and also needs approval.
+snapshot and waits for approval. Approval is human by default:
+
+```json
+"plan": { "step": "steps/plan.md", "approval": "human" }
+```
+
+For an unattended run, a separate judge can approve the plan:
+
+```json
+{
+  "plan": {
+    "step": "steps/plan.md",
+    "approval": "judge",
+    "rubric": "rubrics/plan.md",
+    "inputs": [{ "file": "{{run}}/plan-1.json" }],
+    "maxChars": 200000,
+    "timeout": 900
+  }
+}
+```
+
+A judge-approved plan requires a rubric, either inline text or a file in the
+workflow folder. Its optional `inputs`, `maxChars` and `timeout` follow the
+same rules as a judge gate. With no `inputs`, the judge receives the submitted
+plan and `{{run}}/acceptance.md` when it exists. A rejection sends the run back
+to planning with the review in the next planner's brief. This option supports
+unattended planned runs, but its trade-off is that nobody reads the plan.
+Amendments always require a person, even when plan approval uses a judge.
+
+`gated amend <file>` adds checkpoints in the same shape to a running or
+finished run, and also needs approval.
 
 ## Gates
 

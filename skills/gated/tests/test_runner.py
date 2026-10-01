@@ -264,6 +264,100 @@ class PlannedRunTest(GatedCase):
         self.assertEqual(run.current()["id"], "fix-copy")
 
 
+class JudgePlanApprovalTest(GatedCase):
+    def make_run(self, verdict="PASS", attempts=2, approval="judge"):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = f"cat >/dev/null; echo judge-detail; echo 'VERDICT: {verdict}'"
+        plan = {"step": "plan.md", "approval": approval}
+        if approval == "judge":
+            plan["rubric"] = "rubric.md"
+        self.workflow("judged", {"attempts": attempts, "plan": plan},
+                      {"plan.md": "Plan it.", "rubric.md": "Approve a sound plan."})
+        run = self.start("judged")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "build", "title": "Build", "instructions": "Build it", "gates": []}
+        ]}))
+        self.submit_plan()
+        return self.run_obj()
+
+    def test_judge_pass_activates_run_and_records_approval(self):
+        run = self.make_run()
+        may_stop, message = runner.check(run)
+        self.assertFalse(may_stop)
+        self.assertIn("judge approved the plan", message)
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.current()["id"], "build")
+        approval = next(a for a in run.state["approvals"] if a["gate"] == "plan")
+        self.assertEqual(approval["by"], "judge")
+        self.assertIn("judge: PASS", approval["text"])
+        self.assertNotIn("planReview", run.state)
+        self.assertIn("by judge", runner.write_report(run).read_text())
+        self.assertTrue((run.dir / "plan" / "gates" / "plan-review.log").is_file())
+
+    def test_judge_fail_returns_to_planning_with_review_and_attempt(self):
+        run = self.make_run("FAIL")
+        may_stop, message = runner.check(run)
+        self.assertFalse(may_stop)
+        self.assertIn("judge rejected the plan", message)
+        run = self.run_obj()
+        self.assertEqual(run.status, "planning")
+        self.assertEqual(run.state["attempts"]["plan"], 1)
+        self.assertIn("judge-detail", run.state["planReview"])
+        self.assertIn("## The last plan was rejected", runner.step_brief(run))
+        self.assertEqual(run.state["checkpoints"], [])
+
+    def test_judge_fail_to_budget_blocks_and_resume_replans(self):
+        run = self.make_run("FAIL", attempts=2)
+        runner.check(run)
+        run = self.run_obj()
+        self.submit_plan()
+        run = self.run_obj()
+        may_stop, message = runner.check(run)
+        self.assertTrue(may_stop)
+        self.assertIn("blocked", message)
+        run = self.run_obj()
+        self.assertEqual(run.state["blockedOn"], ["plan"])
+        runner.resume(run)
+        run = self.run_obj()
+        message = runner.approve(run, "approve")
+        self.assertIn("fresh attempts", message)
+        run = self.run_obj()
+        self.assertEqual(run.status, "planning")
+        self.assertEqual(run.state["checkpoints"], [])
+
+    def test_advisory_check_leaves_awaiting_state_file_identical(self):
+        run = self.make_run()
+        state_path = run.dir / "state.json"
+        before = state_path.read_bytes()
+        may_stop, message = runner.check(run, move=False)
+        self.assertTrue(may_stop)
+        self.assertIn("stop hook has the judge review", message)
+        self.assertEqual(state_path.read_bytes(), before)
+
+    def test_amendment_still_waits_for_person(self):
+        run = self.make_run()
+        run.state["amendment"] = {"from": 1, "status": "done", "current": 0}
+        run.save()
+        may_stop, message = runner.check(run)
+        self.assertTrue(may_stop)
+        self.assertIn("person", message)
+        self.assertEqual(self.run_obj().status, "awaiting-approval")
+
+    def test_human_plan_approval_does_not_invoke_judge(self):
+        import os
+        marker = self.tmp / "judge-called"
+        run = self.make_run(approval="human")
+        os.environ["GATED_JUDGE_CMD"] = f"touch {marker}; echo 'VERDICT: PASS'"
+        may_stop, message = runner.check(run)
+        self.assertTrue(may_stop)
+        self.assertIn("person", message)
+        self.assertFalse(marker.exists())
+        runner.approve(run, "approve")
+        approval = next(a for a in self.run_obj().state["approvals"] if a["gate"] == "plan")
+        self.assertEqual(approval["by"], "person")
+
+
 class ShippedExamplesTest(GatedCase):
     def test_every_example_lints(self):
         from helpers import ROOT

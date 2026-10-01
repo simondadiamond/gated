@@ -265,19 +265,27 @@ def amend(run: Run, path: Path) -> str:
     return plan_summary(items)
 
 
+def approve_awaiting(run: Run, text: str, by: str = "person") -> Optional[Dict[str, Any]]:
+    """Activate an approved submitted plan or amendment and return its first checkpoint."""
+    stamp = {"at": now(), "text": text.strip()[:200], "by": by}
+    amendment = run.state.pop("amendment", None)
+    run.state["approvals"].append({**stamp, "gate": "amendment" if amendment else "plan"})
+    run.state.pop("planReview", None)
+    run.state["status"] = "running"
+    if run.state.get("current") is None:
+        run.state["current"] = run.state.get("planAt") or 0
+    activate(run)
+    run.save()
+    return run.current()
+
+
 def approve(run: Run, text: str) -> str:
     """Called by the UserPromptSubmit hook with what the person typed. Records, never checks:
     the next Stop reruns the gates, so the person's prompt never waits on a test suite."""
-    stamp = {"at": now(), "text": text.strip()[:200]}
+    stamp = {"at": now(), "text": text.strip()[:200], "by": "person"}
     if run.status == "awaiting-approval":
-        amendment = run.state.pop("amendment", None)
-        run.state["approvals"].append({**stamp, "gate": "amendment" if amendment else "plan"})
-        run.state["status"] = "running"
-        if run.state.get("current") is None:
-            run.state["current"] = run.state.get("planAt") or 0
-        activate(run)
-        run.save()
-        cp = run.current()
+        amendment = bool(run.state.get("amendment"))
+        cp = approve_awaiting(run, text)
         return f"gated: you approved {'the new checkpoints' if amendment else 'the plan'} for {run.id}. Next is '{cp['id']}'; the agent runs `gated step` for its brief."
     if run.status == "waiting":
         cp = run.current()
@@ -289,17 +297,23 @@ def approve(run: Run, text: str) -> str:
         return f"gated: you approved '{cp['id']}'. When the agent next stops, the gates run once more and the run moves on."
     if run.status == "blocked" and run.state.get("resumeRequested"):
         cp = run.current()
+        plan_blocked = "plan" in run.state.get("blockedOn", [])
         for key in list(run.state["attempts"]):
-            if key.startswith(f"{cp['id']}/") or key == "plan":
+            if (cp and key.startswith(f"{cp['id']}/")) or key == "plan":
                 del run.state["attempts"][key]
+        if plan_blocked:
+            head = run.state["checkpoints"][: run.state.get("planAt") or 0]
+            run.state["checkpoints"] = head
+            run.state["planned"] = False
+            run.state["current"] = run.state.get("planAt") or (0 if head else None)
         for k in ("blockedOn", "resumeRequested"):
             run.state.pop(k, None)
-        if cp:  # fresh-context judges only activity logged after this: the checkpoint is redone
+        if cp and not plan_blocked:  # fresh-context judges only activity logged after this redo
             cp["freshFrom"] = len(G.read_activity(run))
         run.state["approvals"].append({**stamp, "gate": "resume"})
-        run.state["status"] = "planning" if not run.state["checkpoints"] else "running"
+        run.state["status"] = "planning" if plan_blocked or not run.state["checkpoints"] else "running"
         run.save()
-        return f"gated: you gave {run.id} fresh attempts on '{cp['id'] if cp else 'plan'}'."
+        return f"gated: you gave {run.id} fresh attempts on '{cp['id'] if cp and not plan_blocked else 'plan'}'."
     return ""
 
 
@@ -477,7 +491,42 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
             return False, "The plan is written but not submitted. Run `gated submit-plan`, then ask for approval."
         return False, f"Planning isn't finished. Write the plan to {path}, then run `gated submit-plan`."
     if run.status == "awaiting-approval":
-        return True, "Waiting for the person to approve. They type `approve`, `reject` or `cancel run`."
+        plan = run.workflow().get("plan", {})
+        judge_approval = plan.get("approval", "human") == "judge" and not run.state.get("amendment")
+        if not judge_approval:
+            return True, "Waiting for the person to approve. They type `approve`, `reject` or `cancel run`."
+        if not move:
+            return True, "Submitted. When you end your turn the stop hook has the judge review the plan."
+        inputs = plan.get("inputs")
+        if inputs is None:
+            inputs = [{"file": run.state["plan"]}]
+            acceptance = run.dir / "acceptance.md"
+            if acceptance.is_file():
+                inputs.append({"file": str(acceptance)})
+        gate = {"id": "plan-review", "type": "judge", "rubric": plan["rubric"], "inputs": inputs}
+        for key in ("maxChars", "timeout"):
+            if key in plan:
+                gate[key] = plan[key]
+        plan_cp = {"id": "plan"}
+        review = G.check_judge(run, plan_cp, gate)
+        write_log(run, plan_cp, review)
+        if review["ok"]:
+            cp = approve_awaiting(run, review["summary"], by="judge")
+            return False, f"The judge approved the plan. Next is '{cp['id']}': run `gated step` for its brief."
+        n = run.state["attempts"].get("plan", 0) + 1
+        run.state["attempts"]["plan"] = n
+        if n >= (run.workflow().get("attempts") or DEFAULT_ATTEMPTS):
+            return True, block(run, ["plan"])
+        head = run.state["checkpoints"][: run.state.get("planAt") or 0]
+        run.state["checkpoints"] = head
+        run.state["planned"] = False
+        run.state["current"] = run.state.get("planAt") or (0 if head else None)
+        review_text = review["summary"] + "\n" + review.get("log", "")[-3000:]
+        run.state["planReview"] = review_text
+        run.state["status"] = "planning"
+        run.save()
+        return False, ("The judge rejected the plan:\n" + review_text
+                       + "\nHand it to a NEW planning subagent with `gated step`, then `gated submit-plan` again.")
     if run.status == "waiting" and run.state.get("question"):
         return True, "Waiting for the person to answer: " + run.state["question"]["text"]
     if run.status == "waiting":
@@ -600,6 +649,8 @@ def step_brief(run: Run) -> str:
                "Order checkpoints from the smallest foundation to the most complex. Every checkpoint needs at "
                "least one gate that code can check. See references/writing-gates.md in the gated skill.",
                "Don't run `gated submit-plan`; the orchestrator does."]
+        if run.state.get("planReview"):
+            out += ["", "## The last plan was rejected", run.state["planReview"]]
         if wf.get("checkpoints"):
             out += ["", "These fixed checkpoints run after yours, so don't duplicate them: "
                     + ", ".join(c["id"] for c in wf["checkpoints"])]
@@ -680,7 +731,9 @@ def write_report(run: Run) -> Path:
     if s.get("answers"):
         lines += ["## Questions asked mid-run", ""] + [f"- Q: {a['question'][:200]}\n  A: {a['answer'][:200]}" for a in s["answers"]] + [""]
     if s.get("approvals"):
-        lines += ["## Approvals", ""] + [f"- {a['gate']} at {a['at']}: \"{a['text']}\"" for a in s["approvals"]] + [""]
+        lines += ["## Approvals", ""] + [
+            f"- {a['gate']} at {a['at']} by {a.get('by', 'person')}: \"{a['text']}\"" for a in s["approvals"]
+        ] + [""]
     path = run.dir / "report.md"
     path.write_text("\n".join(lines))
     return path
