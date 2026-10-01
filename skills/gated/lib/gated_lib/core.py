@@ -153,9 +153,13 @@ def lint_gate(gate: Any, where: str, wdir: Optional[Path], errors: List[str]) ->
         if not (wdir / gate["rubric"]).is_file():
             errors.append(f"{where}: judge gate '{gid}' rubric {gate['rubric']} does not exist")
     if kind == "judge":
+        if "maxChars" in gate and not (type(gate["maxChars"]) is int and gate["maxChars"] >= 1000):
+            errors.append(f"{where}: judge gate '{gid}' maxChars must be an integer >= 1000")
         for inp in gate.get("inputs", []):
             if not (isinstance(inp, dict) and (("run" in inp) ^ ("file" in inp))):
                 errors.append(f"{where}: judge gate '{gid}' inputs are objects with either 'run' or 'file'")
+            elif "maxChars" in inp and not (type(inp["maxChars"]) is int and inp["maxChars"] >= 1000):
+                errors.append(f"{where}: judge gate '{gid}' input maxChars must be an integer >= 1000")
     if kind == "file" and isinstance(gate.get("path"), str) and SUBAGENT_BLOCKED_NAME_RE.match(Path(gate["path"]).name):
         errors.append(f"{where}: file gate '{gid}' path {Path(gate['path']).name} starts with report, summary, findings "
                       "or analysis; Claude Code won't let a subagent write that name. Rename the file")

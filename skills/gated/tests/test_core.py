@@ -42,6 +42,16 @@ class LintTest(GatedCase):
         self.assertIn("needs 'run'", joined)
         self.assertIn("non-empty list of globs", joined)
 
+    def test_judge_max_chars_must_be_at_least_1000(self):
+        gates = [
+            {"id": "gate-limit", "type": "judge", "rubric": "rubric.md", "maxChars": 999},
+            {"id": "input-limit", "type": "judge", "rubric": "rubric.md",
+             "inputs": [{"file": "out.md", "maxChars": "many"}]},
+        ]
+        errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": gates}]},
+                           {"a.md": "x", "rubric.md": "review"})
+        self.assertEqual(sum("maxChars must be an integer >= 1000" in e for e in errors), 2, errors)
+
     def test_todos_is_automatic(self):
         errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [{"id": "todos", "type": "todos"}]}]}, {"a.md": "x"})
         self.assertTrue(any("automatically" in e for e in errors), errors)

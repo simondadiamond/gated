@@ -112,11 +112,16 @@ Every gate has an `id` (unique in its checkpoint) and a `type`. Optional:
 | `command` | `run` | `timeout` (default 600) |
 | `file` | `path` | `json`, `nonEmpty`, `headings` (list), `contains` (list of regexes), `links: "resolve"` |
 | `red-first` | `run`, `lock` (list of globs) | `timeout` |
-| `judge` | `rubric`: a file in the workflow folder | `inputs`: list of `{"run": "cmd"}` or `{"file": "path"}` |
+| `judge` | `rubric`: a file in the workflow folder or inline rubric text | `inputs`: list of `{"run": "cmd"}` or `{"file": "path"}`, `maxChars`, `timeout` |
 | `human` | `ask` | |
 
 Commands run with `/bin/sh` in the project root. They see `GATED_RUN`,
 `GATED_RUN_ID`, `GATED_CHECKPOINT` and `GATED_PROJECT`.
+
+A judge input uses its own `maxChars`, then the judge gate's `maxChars`, then
+200000 by default. The value must be an integer of at least 1000. Oversized
+inputs keep their beginning and end, mark how much was cut from the middle,
+and report the cut in the gate summary.
 
 ## Run files
 
