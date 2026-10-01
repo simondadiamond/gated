@@ -81,12 +81,15 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
    - When the subagent returns, run `gated submit-plan`. If it lists problems,
      give them to a new foreground planning subagent along with the plan's
      path, and submit again.
-   - Show the person the plan summary it prints, and nothing more. If the run
-     wrote acceptance criteria first (`implement-story` does), show those too,
-     marking any `(assumed)`, so one approval covers both. Ask them to type
-     `approve` or say what to change.
-   - Then end your turn. Only the person's own message can approve. Never
-     approve on their behalf, and never say they approved.
+   - For human approval, show the person the plan summary it prints, and
+     nothing more. If the run wrote acceptance criteria first
+     (`implement-story` does), show those too, marking any `(assumed)`, so one
+     approval covers both. Ask them to type `approve` or say what to change.
+   - Then end your turn. With human approval, only the person's own message can
+     approve. With opt-in judge approval, the stop hook reviews the plan. If it
+     rejects the plan, run `gated step` and hand the rejection brief to a new
+     planning subagent before submitting again. Never approve on the person's
+     behalf, and never say they approved.
    - If they ask for changes, send the changes to the planner, have it rewrite
      the plan, and run `gated submit-plan` again.
 3. **Work each checkpoint.**
@@ -149,10 +152,11 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
 ### Scheduled and headless runs
 
 When there's no one to answer, as with `claude -p "/gated weekly-report"` or a
-Codex automation, don't ask questions. Run the loop to the end. A plan
-approval stops the run as `awaiting-approval` and a human gate as `waiting`,
-which is correct. Run `gated report` last, and end your reply with the
-report's path and the run's status.
+Codex automation, don't ask questions. Run the loop to the end. A plan with
+human approval stops as `awaiting-approval`; a plan with judge approval can
+continue unattended. A human gate stops as `waiting`, which is correct. Run
+`gated report` last, and end your reply with the report's path and the run's
+status.
 
 ## Customizing a workflow
 

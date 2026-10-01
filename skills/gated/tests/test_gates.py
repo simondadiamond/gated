@@ -27,6 +27,18 @@ class CommandGateTest(GatedCase):
         self.assertIn("exited 3", r["summary"])
         self.assertIn("boom", r["log"])
 
+    def test_pending_exit_is_a_pending_result(self):
+        r, _ = gate_result(self, {"id": "ci", "type": "command", "run": "exit 75", "pendingExit": 75})
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["pending"])
+        self.assertEqual(r["summary"], "`exit 75` says not decided yet (exit 75)")
+
+    def test_exit_75_without_pending_setting_is_failure(self):
+        r, _ = gate_result(self, {"id": "ci", "type": "command", "run": "exit 75"})
+        self.assertFalse(r["ok"])
+        self.assertNotIn("pending", r)
+        self.assertIn("exited 75", r["summary"])
+
     def test_timeout(self):
         r, _ = gate_result(self, {"id": "t", "type": "command", "run": "sleep 5", "timeout": 1})
         self.assertFalse(r["ok"])
@@ -144,6 +156,15 @@ class RedFirstTest(GatedCase):
 
 
 class JudgeTest(GatedCase):
+    def test_claude_judge_has_no_tools_or_mcp_servers(self):
+        self.simple_workflow([])
+        run = self.start()
+        kind, argv = G.judge_command(run)
+        self.assertEqual(kind, "claude")
+        tools = argv.index("--tools")
+        self.assertEqual(argv[tools + 1], "")
+        self.assertIn("--strict-mcp-config", argv)
+
     def judge(self, script, rubric="Must mention cats."):
         import os
         os.environ["GATED_JUDGE_CMD"] = script
@@ -153,6 +174,32 @@ class JudgeTest(GatedCase):
         run = self.start()
         (run.dir / "work.md").write_text("cats are here")
         return run, gate
+
+    def test_clip_leaves_small_inputs_unmarked(self):
+        text, cut = G.clip("short input", 20)
+        self.assertEqual(text, "short input")
+        self.assertEqual(cut, 0)
+        self.assertNotIn("characters cut", text)
+
+    def test_clip_keeps_head_and_tail_with_visible_marker(self):
+        text, cut = G.clip("ABCDE12345vwxyz", 10)
+        self.assertEqual(cut, 5)
+        self.assertTrue(text.startswith("ABCDE\n[gated: 5 characters cut from the middle of this input]\n"))
+        self.assertTrue(text.endswith("vwxyz"))
+
+    def test_input_max_chars_beats_gate_limit_and_summary_names_cut(self):
+        prompt = self.tmp / "prompt"
+        run, gate = self.judge(f"cat > {prompt}; echo 'VERDICT: PASS'")
+        body = "H" * 600 + "M" * 1000 + "T" * 600
+        (run.dir / "work.md").write_text(body)
+        gate["maxChars"] = 2000
+        gate["inputs"][0]["maxChars"] = 1200
+        result = G.evaluate(run, run.current(), gate)
+        sent = prompt.read_text()
+        self.assertIn("[gated: 1000 characters cut from the middle of this input]", sent)
+        self.assertIn("H" * 600, sent)
+        self.assertIn("T" * 600, sent)
+        self.assertIn(f"cut: {run.dir / 'work.md'} by 1000 chars", result["summary"])
 
     def test_pass_fail_and_cache(self):
         counter = self.tmp / "calls"

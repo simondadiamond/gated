@@ -265,19 +265,27 @@ def amend(run: Run, path: Path) -> str:
     return plan_summary(items)
 
 
+def approve_awaiting(run: Run, text: str, by: str = "person") -> Optional[Dict[str, Any]]:
+    """Activate an approved submitted plan or amendment and return its first checkpoint."""
+    stamp = {"at": now(), "text": text.strip()[:200], "by": by}
+    amendment = run.state.pop("amendment", None)
+    run.state["approvals"].append({**stamp, "gate": "amendment" if amendment else "plan"})
+    run.state.pop("planReview", None)
+    run.state["status"] = "running"
+    if run.state.get("current") is None:
+        run.state["current"] = run.state.get("planAt") or 0
+    activate(run)
+    run.save()
+    return run.current()
+
+
 def approve(run: Run, text: str) -> str:
     """Called by the UserPromptSubmit hook with what the person typed. Records, never checks:
     the next Stop reruns the gates, so the person's prompt never waits on a test suite."""
-    stamp = {"at": now(), "text": text.strip()[:200]}
+    stamp = {"at": now(), "text": text.strip()[:200], "by": "person"}
     if run.status == "awaiting-approval":
-        amendment = run.state.pop("amendment", None)
-        run.state["approvals"].append({**stamp, "gate": "amendment" if amendment else "plan"})
-        run.state["status"] = "running"
-        if run.state.get("current") is None:
-            run.state["current"] = run.state.get("planAt") or 0
-        activate(run)
-        run.save()
-        cp = run.current()
+        amendment = bool(run.state.get("amendment"))
+        cp = approve_awaiting(run, text)
         return f"gated: you approved {'the new checkpoints' if amendment else 'the plan'} for {run.id}. Next is '{cp['id']}'; the agent runs `gated step` for its brief."
     if run.status == "waiting":
         cp = run.current()
@@ -289,17 +297,23 @@ def approve(run: Run, text: str) -> str:
         return f"gated: you approved '{cp['id']}'. When the agent next stops, the gates run once more and the run moves on."
     if run.status == "blocked" and run.state.get("resumeRequested"):
         cp = run.current()
+        plan_blocked = "plan" in run.state.get("blockedOn", [])
         for key in list(run.state["attempts"]):
-            if key.startswith(f"{cp['id']}/") or key == "plan":
+            if (cp and key.startswith(f"{cp['id']}/")) or key == "plan":
                 del run.state["attempts"][key]
+        if plan_blocked:
+            head = run.state["checkpoints"][: run.state.get("planAt") or 0]
+            run.state["checkpoints"] = head
+            run.state["planned"] = False
+            run.state["current"] = run.state.get("planAt") or (0 if head else None)
         for k in ("blockedOn", "resumeRequested"):
             run.state.pop(k, None)
-        if cp:  # fresh-context judges only activity logged after this: the checkpoint is redone
+        if cp and not plan_blocked:  # fresh-context judges only activity logged after this redo
             cp["freshFrom"] = len(G.read_activity(run))
         run.state["approvals"].append({**stamp, "gate": "resume"})
-        run.state["status"] = "planning" if not run.state["checkpoints"] else "running"
+        run.state["status"] = "planning" if plan_blocked or not run.state["checkpoints"] else "running"
         run.save()
-        return f"gated: you gave {run.id} fresh attempts on '{cp['id'] if cp else 'plan'}'."
+        return f"gated: you gave {run.id} fresh attempts on '{cp['id'] if cp and not plan_blocked else 'plan'}'."
     return ""
 
 
@@ -477,7 +491,42 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
             return False, "The plan is written but not submitted. Run `gated submit-plan`, then ask for approval."
         return False, f"Planning isn't finished. Write the plan to {path}, then run `gated submit-plan`."
     if run.status == "awaiting-approval":
-        return True, "Waiting for the person to approve. They type `approve`, `reject` or `cancel run`."
+        plan = run.workflow().get("plan", {})
+        judge_approval = plan.get("approval", "human") == "judge" and not run.state.get("amendment")
+        if not judge_approval:
+            return True, "Waiting for the person to approve. They type `approve`, `reject` or `cancel run`."
+        if not move:
+            return True, "Submitted. When you end your turn the stop hook has the judge review the plan."
+        inputs = plan.get("inputs")
+        if inputs is None:
+            inputs = [{"file": run.state["plan"]}]
+            acceptance = run.dir / "acceptance.md"
+            if acceptance.is_file():
+                inputs.append({"file": str(acceptance)})
+        gate = {"id": "plan-review", "type": "judge", "rubric": plan["rubric"], "inputs": inputs}
+        for key in ("maxChars", "timeout"):
+            if key in plan:
+                gate[key] = plan[key]
+        plan_cp = {"id": "plan"}
+        review = G.check_judge(run, plan_cp, gate)
+        write_log(run, plan_cp, review)
+        if review["ok"]:
+            cp = approve_awaiting(run, review["summary"], by="judge")
+            return False, f"The judge approved the plan. Next is '{cp['id']}': run `gated step` for its brief."
+        n = run.state["attempts"].get("plan", 0) + 1
+        run.state["attempts"]["plan"] = n
+        if n >= (run.workflow().get("attempts") or DEFAULT_ATTEMPTS):
+            return True, block(run, ["plan"])
+        head = run.state["checkpoints"][: run.state.get("planAt") or 0]
+        run.state["checkpoints"] = head
+        run.state["planned"] = False
+        run.state["current"] = run.state.get("planAt") or (0 if head else None)
+        review_text = review["summary"] + "\n" + review.get("log", "")[-3000:]
+        run.state["planReview"] = review_text
+        run.state["status"] = "planning"
+        run.save()
+        return False, ("The judge rejected the plan:\n" + review_text
+                       + "\nHand it to a NEW planning subagent with `gated step`, then `gated submit-plan` again.")
     if run.status == "waiting" and run.state.get("question"):
         return True, "Waiting for the person to answer: " + run.state["question"]["text"]
     if run.status == "waiting":
@@ -505,19 +554,69 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     if changed:
         results.append({"id": "locks", "type": "locks", "ok": False, "at": now(), "log": "",
                         "summary": "locked files changed since they were locked: " + ", ".join(changed)})
+    gate_by_id = {g["id"]: g for g in cp["gates"]}
+    checked_at = now()
+    pending_since = run.state.setdefault("pendingSince", {}) if move else dict(run.state.get("pendingSince", {}))
+    pending = []
+    pending_keys = set()
+    for r in results:
+        if not r.get("pending"):
+            continue
+        key = f"{cp['id']}/{r['id']}"
+        since = pending_since.get(key, checked_at)
+        maximum = gate_by_id.get(r["id"], {}).get("pendingMax", 21600)
+        try:
+            start = datetime.datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            current = datetime.datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            expired = (current - start).total_seconds() > maximum
+        except (TypeError, ValueError):
+            since, expired = checked_at, False
+        if expired:
+            r.pop("pending", None)
+            r["summary"] = f"still pending after {maximum}s: {r['summary']}"
+        else:
+            pending_since[key] = since
+            pending_keys.add(key)
+            r["since"] = since
+            pending.append(r)
+    if move:
+        prefix = cp["id"] + "/"
+        for key in list(pending_since):
+            if key.startswith(prefix) and key not in pending_keys:
+                del pending_since[key]
     for r in results:
         write_log(run, cp, r)
-    failing = [r for r in results if not r["ok"] and r["type"] != "human"]
+    failing = [r for r in results if not r["ok"] and r["type"] != "human" and not r.get("pending")]
     human = [r for r in results if not r["ok"] and r["type"] == "human"]
     if not move:
+        sections = []
         if failing:
             lines = "\n".join(f"- {r['id']} ({r['type']}): {r['summary']}" for r in failing)
-            return False, f"Checkpoint '{cp['id']}' isn't done. Failing gates:\n{lines}\n\nFull logs: {run.dir / cp['id'] / 'gates'}"
+            sections.append(f"Failing gates:\n{lines}")
+        if pending:
+            lines = "\n".join(f"- {r['id']} ({r['type']}): {r['summary']}" for r in pending)
+            sections.append(f"Pending gates:\n{lines}")
+        if sections:
+            return not failing, (f"Checkpoint '{cp['id']}' isn't done. " + "\n\n".join(sections)
+                                 + f"\n\nFull logs: {run.dir / cp['id'] / 'gates'}")
         if human:
             return True, f"Checkpoint '{cp['id']}' passes its checks. End your turn: the stop hook confirms, then the person is asked."
         return True, (f"Every gate on '{cp['id']}' passes. End your turn: the stop hook reruns the gates and moves "
                       "the run on. Only the hook can advance a run.")
-    run.state["last"][cp["id"]] = [{k: r[k] for k in ("id", "type", "ok", "summary", "at")} for r in results]
+    last_results = []
+    for r in results:
+        saved = {k: r[k] for k in ("id", "type", "ok", "summary", "at")}
+        if r.get("pending"):
+            saved.update({"pending": True, "since": r["since"]})
+        last_results.append(saved)
+    run.state["last"][cp["id"]] = last_results
+    if pending and not failing:
+        run.state["status"] = "running"
+        run.save()
+        details = "; ".join(f"{r['id']}: {r['summary']} (pending since {r['since']})" for r in pending)
+        return True, ("Waiting on outside systems: " + details + ". No attempt spent. The next stop rechecks; "
+                      "something has to give the agent a turn (the person, a scheduled `claude -p` resume, or a "
+                      "background wait finishing).")
     if not failing and not human:
         message = advance(run)
         run.save()
@@ -600,6 +699,8 @@ def step_brief(run: Run) -> str:
                "Order checkpoints from the smallest foundation to the most complex. Every checkpoint needs at "
                "least one gate that code can check. See references/writing-gates.md in the gated skill.",
                "Don't run `gated submit-plan`; the orchestrator does."]
+        if run.state.get("planReview"):
+            out += ["", "## The last plan was rejected", run.state["planReview"]]
         if wf.get("checkpoints"):
             out += ["", "These fixed checkpoints run after yours, so don't duplicate them: "
                     + ", ".join(c["id"] for c in wf["checkpoints"])]
@@ -665,12 +766,20 @@ def write_report(run: Run) -> Path:
         lines += ["", "## Blocked", "", "These gates used every attempt. None was skipped. Fix what they report, "
                   "then `gated resume` to continue with fresh attempts.", ""]
         lines += [f"- {k}" for k in s["blockedOn"]]
+    if s.get("pendingSince"):
+        lines += ["", "## Pending outside systems", ""]
+        for key, since in sorted(s["pendingSince"].items()):
+            cp_id, gate_id = key.split("/", 1)
+            last = next((r for r in s.get("last", {}).get(cp_id, []) if r["id"] == gate_id), None)
+            summary = f": {last['summary']}" if last else ""
+            lines.append(f"- {key} since {since}{summary}")
     lines += ["", "## Checkpoints", ""]
     for cp in s["checkpoints"]:
         lines.append(f"### {cp['title']} [{cp['id']}]: {cp['status']}")
         for r in s.get("last", {}).get(cp["id"], []):
             used = s["attempts"].get(f"{cp['id']}/{r['id']}")
-            lines.append(f"- {'PASS' if r['ok'] else 'FAIL'} {r['id']} ({r['type']}): {r['summary']}" + (f"  [attempts: {used}]" if used else ""))
+            verdict = "PENDING" if r.get("pending") else ("PASS" if r["ok"] else "FAIL")
+            lines.append(f"- {verdict} {r['id']} ({r['type']}): {r['summary']}" + (f"  [attempts: {used}]" if used else ""))
         lines.append("")
     if s.get("splits"):
         lines += ["## Split into new stories", ""] + [
@@ -680,7 +789,9 @@ def write_report(run: Run) -> Path:
     if s.get("answers"):
         lines += ["## Questions asked mid-run", ""] + [f"- Q: {a['question'][:200]}\n  A: {a['answer'][:200]}" for a in s["answers"]] + [""]
     if s.get("approvals"):
-        lines += ["## Approvals", ""] + [f"- {a['gate']} at {a['at']}: \"{a['text']}\"" for a in s["approvals"]] + [""]
+        lines += ["## Approvals", ""] + [
+            f"- {a['gate']} at {a['at']} by {a.get('by', 'person')}: \"{a['text']}\"" for a in s["approvals"]
+        ] + [""]
     path = run.dir / "report.md"
     path.write_text("\n".join(lines))
     return path

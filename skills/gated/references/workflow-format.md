@@ -49,7 +49,7 @@ Run `gated lint <name>` after every change.
 | `basedOn` | Set by `gated customize`: which workflow this copy came from. |
 | `judge` | `claude` or `codex`: which CLI grades `judge` gates. Defaults to the harness running the workflow. |
 | `before` | Fixed checkpoints that run ahead of the `plan`, like writing acceptance criteria. Needs a `plan`. |
-| `plan` | A planning step. Its subagent writes this run's checkpoints, and the person approves them. It can list `skills` for the planner. |
+| `plan` | A planning step. Its subagent writes this run's checkpoints. `approval` defaults to `human`; set it to `judge` with a `rubric` for unattended review. It can list `skills` for the planner. |
 | `every` | Gates added to every checkpoint, planned or fixed. A test suite usually goes here. |
 | `checkpoints` | Fixed checkpoints. With a `plan`, they run after the planned ones. |
 
@@ -99,8 +99,37 @@ A planner writes `{{run}}/checkpoints.json`:
 
 Planned checkpoints hold `instructions` text instead of a `step` file. `gated
 submit-plan` validates them, snapshots the file as `plan-<n>.json`, locks the
-snapshot and waits for approval. `gated amend <file>` adds checkpoints in the
-same shape to a running or finished run, and also needs approval.
+snapshot and waits for approval. Approval is human by default:
+
+```json
+"plan": { "step": "steps/plan.md", "approval": "human" }
+```
+
+For an unattended run, a separate judge can approve the plan:
+
+```json
+{
+  "plan": {
+    "step": "steps/plan.md",
+    "approval": "judge",
+    "rubric": "rubrics/plan.md",
+    "inputs": [{ "file": "{{run}}/plan-1.json" }],
+    "maxChars": 200000,
+    "timeout": 900
+  }
+}
+```
+
+A judge-approved plan requires a rubric, either inline text or a file in the
+workflow folder. Its optional `inputs`, `maxChars` and `timeout` follow the
+same rules as a judge gate. With no `inputs`, the judge receives the submitted
+plan and `{{run}}/acceptance.md` when it exists. A rejection sends the run back
+to planning with the review in the next planner's brief. This option supports
+unattended planned runs, but its trade-off is that nobody reads the plan.
+Amendments always require a person, even when plan approval uses a judge.
+
+`gated amend <file>` adds checkpoints in the same shape to a running or
+finished run, and also needs approval.
 
 ## Gates
 
@@ -109,14 +138,23 @@ Every gate has an `id` (unique in its checkpoint) and a `type`. Optional:
 
 | Type | Required fields | Optional fields |
 | --- | --- | --- |
-| `command` | `run` | `timeout` (default 600) |
+| `command` | `run` | `timeout` (default 600), `pendingExit`, `pendingMax` (default 21600 seconds) |
 | `file` | `path` | `json`, `nonEmpty`, `headings` (list), `contains` (list of regexes), `links: "resolve"` |
 | `red-first` | `run`, `lock` (list of globs) | `timeout` |
-| `judge` | `rubric`: a file in the workflow folder | `inputs`: list of `{"run": "cmd"}` or `{"file": "path"}` |
+| `judge` | `rubric`: a file in the workflow folder or inline rubric text | `inputs`: list of `{"run": "cmd"}` or `{"file": "path"}`, `maxChars`, `timeout` |
 | `human` | `ask` | |
 
 Commands run with `/bin/sh` in the project root. They see `GATED_RUN`,
-`GATED_RUN_ID`, `GATED_CHECKPOINT` and `GATED_PROJECT`.
+`GATED_RUN_ID`, `GATED_CHECKPOINT` and `GATED_PROJECT`. A command that waits on
+an outside system can set `pendingExit` to an exit code from 1 to 255, except
+126 and 127. That exit reports pending without spending an attempt. If it stays
+pending longer than `pendingMax` seconds, 21600 by default, it becomes a normal
+failure. These fields are allowed only on command gates.
+
+A judge input uses its own `maxChars`, then the judge gate's `maxChars`, then
+200000 by default. The value must be an integer of at least 1000. Oversized
+inputs keep their beginning and end, mark how much was cut from the middle,
+and report the cut in the gate summary.
 
 ## Run files
 
@@ -146,6 +184,10 @@ Starting a run writes `.gated/.gitignore`, so run folders never show up in git.
 | `blocked` | a gate used all its attempts, or `state.json` changed outside gated | lets the turn end; the person types `approve` to grant fresh attempts after `gated resume` |
 | `done` | every checkpoint passed | lets the turn end |
 | `cancelled` | the person typed `cancel run` | lets the turn end |
+
+Pending is a gate result, not a run status. While a command gate is pending the
+run stays `running`, the stop hook lets the turn end, and the next stop checks
+again without spending an attempt.
 
 A checkpoint with `skills` gets a `skills` gate: in Claude Code, a subagent
 must have loaded each one with the Skill tool during that checkpoint.

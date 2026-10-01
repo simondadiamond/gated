@@ -130,6 +130,32 @@ def available_workflows(project: Path) -> List[Dict[str, str]]:
     return list(seen.values())
 
 
+def rubric_is_path(value: str) -> bool:
+    """Rubric prose is inline; names that look like files must resolve in the workflow."""
+    return "\n" not in value and ("/" in value or Path(value).suffix.lower() in (".md", ".txt"))
+
+
+def lint_judge_options(value: Dict[str, Any], where: str, wdir: Optional[Path], errors: List[str]) -> None:
+    rubric = value.get("rubric")
+    if "rubric" in value and not (isinstance(rubric, str) and rubric.strip()):
+        errors.append(f"{where}: rubric must be non-empty text or a file in the workflow folder")
+    elif wdir is not None and isinstance(rubric, str) and rubric_is_path(rubric) and not (wdir / rubric).is_file():
+        errors.append(f"{where}: rubric {rubric} does not exist")
+    if "maxChars" in value and not (type(value["maxChars"]) is int and value["maxChars"] >= 1000):
+        errors.append(f"{where}: maxChars must be an integer >= 1000")
+    if "timeout" in value and not (type(value["timeout"]) is int and value["timeout"] > 0):
+        errors.append(f"{where}: timeout must be a positive integer")
+    inputs = value.get("inputs", [])
+    if not isinstance(inputs, list):
+        errors.append(f"{where}: inputs must be a list of objects with either 'run' or 'file'")
+        return
+    for inp in inputs:
+        if not (isinstance(inp, dict) and (("run" in inp) ^ ("file" in inp))):
+            errors.append(f"{where}: inputs are objects with either 'run' or 'file'")
+        elif "maxChars" in inp and not (type(inp["maxChars"]) is int and inp["maxChars"] >= 1000):
+            errors.append(f"{where}: input maxChars must be an integer >= 1000")
+
+
 def lint_gate(gate: Any, where: str, wdir: Optional[Path], errors: List[str]) -> None:
     if not isinstance(gate, dict):
         errors.append(f"{where}: a gate must be an object")
@@ -145,17 +171,25 @@ def lint_gate(gate: Any, where: str, wdir: Optional[Path], errors: List[str]) ->
     for key in need.get(kind, []):
         if key not in gate:
             errors.append(f"{where}: {kind} gate '{gid}' needs '{key}'")
+    if kind != "command" and ("pendingExit" in gate or "pendingMax" in gate):
+        errors.append(f"{where}: gate '{gid}' pendingExit and pendingMax are only allowed on command gates")
+    if kind == "command":
+        pending_exit = gate.get("pendingExit")
+        if "pendingExit" in gate and not (
+            type(pending_exit) is int and 1 <= pending_exit <= 255 and pending_exit not in (126, 127)
+        ):
+            errors.append(f"{where}: command gate '{gid}' pendingExit must be an integer from 1 to 255 except 126 and 127")
+        pending_max = gate.get("pendingMax")
+        if "pendingMax" in gate and not (
+            not isinstance(pending_max, bool) and isinstance(pending_max, (int, float)) and pending_max > 0
+        ):
+            errors.append(f"{where}: command gate '{gid}' pendingMax must be a number greater than 0")
     if kind == "red-first" and "lock" in gate and not (
         isinstance(gate["lock"], list) and gate["lock"] and all(isinstance(g, str) for g in gate["lock"])
     ):
         errors.append(f"{where}: red-first gate '{gid}' needs 'lock' as a non-empty list of globs")
-    if kind == "judge" and wdir is not None and isinstance(gate.get("rubric"), str):
-        if not (wdir / gate["rubric"]).is_file():
-            errors.append(f"{where}: judge gate '{gid}' rubric {gate['rubric']} does not exist")
     if kind == "judge":
-        for inp in gate.get("inputs", []):
-            if not (isinstance(inp, dict) and (("run" in inp) ^ ("file" in inp))):
-                errors.append(f"{where}: judge gate '{gid}' inputs are objects with either 'run' or 'file'")
+        lint_judge_options(gate, f"{where}: judge gate '{gid}'", wdir, errors)
     if kind == "file" and isinstance(gate.get("path"), str) and SUBAGENT_BLOCKED_NAME_RE.match(Path(gate["path"]).name):
         errors.append(f"{where}: file gate '{gid}' path {Path(gate['path']).name} starts with report, summary, findings "
                       "or analysis; Claude Code won't let a subagent write that name. Rename the file")
@@ -232,10 +266,18 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
     if plan is not None:
         if not isinstance(plan, dict) or not isinstance(plan.get("step"), str):
             errors.append("'plan' must be an object with 'step', the planner's instructions")
-        elif wdir is not None and not (wdir / plan["step"]).is_file():
-            errors.append(f"plan step {plan['step']} does not exist")
         else:
+            if wdir is not None and not (wdir / plan["step"]).is_file():
+                errors.append(f"plan step {plan['step']} does not exist")
             lint_skills(plan.get("skills"), "plan", errors)
+            approval = plan.get("approval", "human")
+            if approval not in ("human", "judge"):
+                errors.append("plan approval must be \"human\" or \"judge\"")
+            if approval == "judge":
+                if "rubric" not in plan:
+                    errors.append("plan approval \"judge\" requires 'rubric'")
+                else:
+                    lint_judge_options(plan, "plan judge", wdir, errors)
     cps = data.get("checkpoints", [])
     if not isinstance(cps, list):
         errors.append("'checkpoints' must be a list")

@@ -25,6 +25,16 @@ class LintTest(GatedCase):
         wdir = self.workflow("w", data, files)
         return lint_workflow(json.loads((wdir / "workflow.json").read_text()), wdir)
 
+    def test_command_pending_fields_are_validated_and_command_only(self):
+        bad_command = {"id": "ci", "type": "command", "run": "ci", "pendingExit": 126, "pendingMax": 0}
+        bad_file = {"id": "f", "type": "file", "path": "x", "pendingExit": 75}
+        errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [bad_command, bad_file]}]},
+                           {"a.md": "x"})
+        joined = "\n".join(errors)
+        self.assertIn("pendingExit must be an integer from 1 to 255 except 126 and 127", joined)
+        self.assertIn("pendingMax must be a number greater than 0", joined)
+        self.assertIn("only allowed on command gates", joined)
+
     def test_valid_fixed_workflow(self):
         self.assertEqual(self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [
             {"id": "t", "type": "command", "run": "true"}]}]}, {"a.md": "x"}), [])
@@ -41,6 +51,27 @@ class LintTest(GatedCase):
         self.assertIn("type 'vibes'", joined)
         self.assertIn("needs 'run'", joined)
         self.assertIn("non-empty list of globs", joined)
+
+    def test_plan_judge_requires_rubric_and_known_approval(self):
+        missing = self.lint({"plan": {"step": "p.md", "approval": "judge"}}, {"p.md": "x"})
+        unknown = self.lint({"plan": {"step": "p.md", "approval": "robot"}}, {"p.md": "x"})
+        self.assertTrue(any("requires 'rubric'" in e for e in missing), missing)
+        self.assertTrue(any("approval" in e and "human" in e and "judge" in e for e in unknown), unknown)
+
+    def test_plan_judge_accepts_inline_rubric_and_judge_inputs(self):
+        errors = self.lint({"plan": {"step": "p.md", "approval": "judge", "rubric": "Check every item.",
+                                            "inputs": [{"run": "git diff", "maxChars": 1000}]}}, {"p.md": "x"})
+        self.assertEqual(errors, [])
+
+    def test_judge_max_chars_must_be_at_least_1000(self):
+        gates = [
+            {"id": "gate-limit", "type": "judge", "rubric": "rubric.md", "maxChars": 999},
+            {"id": "input-limit", "type": "judge", "rubric": "rubric.md",
+             "inputs": [{"file": "out.md", "maxChars": "many"}]},
+        ]
+        errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": gates}]},
+                           {"a.md": "x", "rubric.md": "review"})
+        self.assertEqual(sum("maxChars must be an integer >= 1000" in e for e in errors), 2, errors)
 
     def test_todos_is_automatic(self):
         errors = self.lint({"checkpoints": [{"id": "a", "step": "a.md", "gates": [{"id": "todos", "type": "todos"}]}]}, {"a.md": "x"})

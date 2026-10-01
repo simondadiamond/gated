@@ -51,6 +51,25 @@ subagents, so the gate could never pass. `gated lint` catches it.
 { "id": "pushed", "type": "command", "run": "test \"$(git rev-parse @)\" = \"$(git rev-parse @{u})\"" }
 ```
 
+**Outside systems**
+
+A command can exit 75 while CI or another service has not decided yet:
+
+```json
+{ "id": "pr-checks", "type": "command", "run": "sh {{workflow}}/checks/pr-checks.sh",
+  "pendingExit": 75, "pendingMax": 21600 }
+```
+
+```sh
+states=$(gh pr checks --required --json state --jq '.[].state') || exit 1
+printf '%s\n' "$states" | grep -Eq 'FAILURE|ERROR|CANCELLED' && exit 1
+printf '%s\n' "$states" | grep -Eq 'PENDING|QUEUED|IN_PROGRESS' && exit 75
+exit 0
+```
+
+Exit 75 spends no attempt until `pendingMax` expires. Any other nonzero exit is
+a failure immediately.
+
 **Documents and reports**
 
 ```json
