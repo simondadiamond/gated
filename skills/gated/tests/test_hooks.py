@@ -156,6 +156,9 @@ class PreToolTest(GatedCase):
         self.assertFalse(edits_files('gated step > $TMPDIR/brief.md'))
         self.assertTrue(edits_files("gated step > brief.md"))
         self.assertTrue(edits_files("echo x > /tmp/a; echo y > src/b.ts"))
+        # Same day: `gated step > .gated/runs/<id>/brief.md`, the step's own workspace.
+        self.assertFalse(edits_files("python3 bin/gated step > .gated/runs/story-1/brief.md"))
+        self.assertTrue(edits_files("gated step > .gated/brief.md"))
 
     def test_shell_writes_to_locked_file(self):
         self.assertEqual(self.pre("Bash", {"command": f"echo x > {self.locked}"})[0], 2)
