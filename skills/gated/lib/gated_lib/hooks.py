@@ -26,7 +26,9 @@ PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* M
 WRITE_HINT_RE = re.compile(r"(>|\btee\b|\bsed\b|\brm\b|\bmv\b|\bcp\b|\bln\b|\btruncate\b|\bdd\b|\bchmod\b|\binstall\b"
                            r"|\b(?:python3?|perl|node|ruby)\b[^|;&]*\s-(?:c|e|i|pi)\b|\bgit\s+(checkout|restore|stash|reset)\b)")
 GATED_CALL_RE = re.compile(r"""^\s*(?:python3\s+)?["']?[^\s"';&|]*\bgated["']?\s+[a-z-]+\b""")
-HARMLESS_REDIRECT_RE = re.compile(r"\d*>&\d|\d*>\s*/dev/null")
+# A redirect into /dev/null or a temp folder writes nothing in the project: saving `gated step`
+# to /tmp to hand it on isn't the orchestrator doing the work.
+HARMLESS_REDIRECT_RE = re.compile(r"\d*>&\d|\d*>>?\s*(?:/dev/null|/(?:private/)?tmp/[^\s;&|]*|\$\{?TMPDIR\}?/[^\s;&|]*)")
 # A '>' inside quotes is an argument, not a redirect: `gh pr list --search "merged:>=2026-09-23"`.
 QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 

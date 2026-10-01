@@ -148,6 +148,15 @@ class PreToolTest(GatedCase):
         self.assertTrue(edits_files('echo "x" > out.md'))
         self.assertTrue(edits_files("sed -i 's/a/b/' f.md"))
 
+    def test_redirect_into_a_temp_folder_is_not_an_edit(self):
+        # Live run 2026-10-01: `gated step > /tmp/brief.md` failed fresh-context for good.
+        from gated_lib.hooks import edits_files
+        self.assertFalse(edits_files("cd /repo; python3 bin/gated step > /tmp/gated-step.md"))
+        self.assertFalse(edits_files("gated check >> /private/tmp/check.log 2>&1"))
+        self.assertFalse(edits_files('gated step > $TMPDIR/brief.md'))
+        self.assertTrue(edits_files("gated step > brief.md"))
+        self.assertTrue(edits_files("echo x > /tmp/a; echo y > src/b.ts"))
+
     def test_shell_writes_to_locked_file(self):
         self.assertEqual(self.pre("Bash", {"command": f"echo x > {self.locked}"})[0], 2)
         self.assertEqual(self.pre("Bash", {"command": "sed -i '' s/a/b/ .claude/workflows/demo/workflow.json"})[0], 2)
