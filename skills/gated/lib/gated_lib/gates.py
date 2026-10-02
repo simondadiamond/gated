@@ -22,8 +22,9 @@ JUDGE_PREAMBLE = """You are an independent reviewer. You did not do this work an
 context with whoever did. Judge it only against the rubric below and the inputs that follow it. \
 Do not change any files. Be strict: a criterion that is not clearly met is not met.
 
-List every criterion from the rubric with MET or NOT MET and one line of evidence. Then end your \
-reply with exactly one line, either `VERDICT: PASS` or `VERDICT: FAIL`.
+List every criterion from the rubric with MET or NOT MET and one line of evidence. Report every \
+NOT MET item you find in this one pass; don't stop at the first, because the work is fixed from your \
+list and judged again. Then end your reply with exactly one line, either `VERDICT: PASS` or `VERDICT: FAIL`.
 """
 
 

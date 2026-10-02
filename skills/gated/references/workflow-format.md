@@ -46,6 +46,7 @@ Run `gated lint <name>` after every change.
 | `freshContext` | `false` turns off the fresh-subagent rule. Default `true`. |
 | `skills` | Skills every checkpoint's subagent must load. A checkpoint can list its own `skills` too. |
 | `storySkill` | The skill a step uses to create a new story when it splits work off. Default: `gh issue create`. |
+| `shares` | Folders, relative to this one, whose files the workflow uses (shared steps, rubrics, check scripts). They're locked with the workflow for the whole run. Lets several workflows, like a lite and a full path, share one set of checks. |
 | `basedOn` | Set by `gated customize`: which workflow this copy came from. |
 | `judge` | `claude` or `codex`: which CLI grades `judge` gates. Defaults to the harness running the workflow. |
 | `before` | Fixed checkpoints that run ahead of the `plan`, like writing acceptance criteria. Needs a `plan`. |
@@ -128,6 +129,17 @@ to planning with the review in the next planner's brief. This option supports
 unattended planned runs, but its trade-off is that nobody reads the plan.
 Amendments always require a person, even when plan approval uses a judge.
 
+Two more plan options:
+
+- `gates`: command or file gates that run on the submitted plan before the
+  judge does. When one fails, the plan goes back to the planner with the
+  output, and no judge call is paid. Put every check a script can decide here
+  (a ledger's format, a criteria file's headings).
+- `lock`: files that freeze when the plan is approved, like
+  `["{{run}}/acceptance.md"]`. The planner can still edit them before approval.
+  After it, a change fails the `locks` gate unless it goes through
+  `gated relock <file> --reason "..."` and the person's approve.
+
 `gated amend <file>` adds checkpoints in the same shape to a running or
 finished run, and also needs approval.
 
@@ -201,7 +213,8 @@ Findings aren't gates. The Stop hook records each `- ` line in a checkpoint's
 `noticed.md` once, the report lists them under "Found, not fixed", and
 `gated findings --since 30d` gathers them across runs.
 
-`gated check`, when the agent runs it, only reports. The Stop hook is the only
-thing that advances a run. Everything in the workflow folder except
+`gated check`, when the agent runs it, only reports, and it doesn't run judge
+gates: a verdict from the agent's shell couldn't be trusted or saved, so judges
+run once per stop. The Stop hook is the only thing that advances a run. Everything in the workflow folder except
 `learnings.md` is locked while a run uses it, check scripts and rubrics
 included. A gate id in `every` can't be reused by a checkpoint.
