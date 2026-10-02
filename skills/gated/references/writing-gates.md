@@ -133,8 +133,9 @@ Seen in real runs:
 **Protect what the gates trust.** `gated` locks the workflow folder. A gate
 that runs code outside it (a test config, a harness a proof script reads, a
 helper in `scripts/`) can be weakened by the same agent it checks. List those
-paths in a `checks/untouched` script that fails when the branch changes them.
-Fail the run's own files too: nothing under `.gated/` belongs in a commit.
+paths under `protect` in `workflow.json`: the run locks them, and the agent is
+stopped at the edit, not at a gate three steps later. The run's own files are
+already covered: a tracked file under `.gated/runs/<id>` fails the checkpoint.
 
 **Cap every loop.** `gated check` is advisory and spends no attempt, so an
 orchestrator can call a failing judge again and again. Say in the step: "after

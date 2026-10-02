@@ -1078,3 +1078,51 @@ class RunFilesTest(GatedCase):
         self.todos_done(run)
         self.hook("stop", {"session_id": "owner"})
         self.assertEqual(self.run_obj().status, "done")
+
+
+class ProtectTest(GatedCase):
+    def protected_run(self):
+        (self.project / "config").mkdir()
+        (self.project / "config" / "test.cfg").write_text("strict = true\n")
+        (self.project / "harness").mkdir()
+        (self.project / "harness" / "proof.mjs").write_text("export const ok = 1\n")
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}],
+                             protect=["config/test.cfg", "harness/"])
+        return self.start(session="owner")
+
+    def write_call(self, path):
+        return self.hook("pretool", {"session_id": "owner", "agent_id": "sub", "tool_name": "Write",
+                                     "tool_input": {"file_path": str(path)}})
+
+    def test_edits_and_new_files_under_protected_paths_are_refused(self):
+        self.protected_run()
+        code, _, err = self.write_call(self.project / "config" / "test.cfg")
+        self.assertEqual(code, 2)
+        self.assertIn("protects", err)
+        code, _, err = self.write_call(self.project / "harness" / "new-helper.mjs")
+        self.assertEqual(code, 2, "a new file in a protected folder is refused too")
+        code, _, _ = self.write_call(self.project / "src.txt")
+        self.assertEqual(code, 0)
+
+    def test_a_change_that_slips_past_the_hook_fails_the_locks_gate(self):
+        run = self.protected_run()
+        self.todos_done(run)
+        (self.project / "harness" / "proof.mjs").write_text("export const ok = 0\n")
+        (self.project / "harness" / "extra.mjs").write_text("x\n")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, err)
+        self.assertIn("locked files changed", err)
+        self.assertIn("extra.mjs", err)
+
+    def test_protected_files_cannot_be_relocked(self):
+        self.protected_run()
+        code, _, err = self.gated("relock", "config/test.cfg", "--reason", "want looser tests")
+        self.assertEqual(code, 1)
+        self.assertIn("can't be relocked", err)
+
+    def test_protect_paths_must_stay_inside_the_project(self):
+        from gated_lib.core import lint_workflow
+        base = {"name": "x", "description": "d", "checkpoints": [{"id": "a", "step": "s.md"}]}
+        for bad in (["/etc/passwd"], ["../other"], [".gated/runs"], "harness"):
+            self.assertTrue(any("protect" in e for e in lint_workflow({**base, "protect": bad}, None)), bad)
+        self.assertFalse(any("protect" in e for e in lint_workflow({**base, "protect": ["harness/", "*.cfg"]}, None)))

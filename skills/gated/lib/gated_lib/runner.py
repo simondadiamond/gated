@@ -18,6 +18,7 @@ from .core import (
     every_collisions,
     find_workflow,
     ignore_runs,
+    protected_files,
     record_claim,
     lint_checkpoint,
     load_workflow,
@@ -151,6 +152,11 @@ def start(project: Path, name: str, args: List[str]) -> Run:
     write_json(rdir / "state.json", state)
     run = Run(rdir)
     lock(run, definition_files(wdir, wf.get("shares")))
+    if wf.get("protect"):
+        # Code outside the workflow that its gates trust (a test config, a harness a check reads).
+        # Locked like the workflow, so the agent being checked can't weaken the checker.
+        run.state["protect"] = list(wf["protect"])
+        lock(run, protected_files(project, wf["protect"]))
     if starts_running:
         activate(run)
     run.save()
@@ -466,6 +472,15 @@ def collect_splits(run: Run, cp: Dict[str, Any]) -> List[Dict[str, Any]]:
     return pending
 
 
+def new_protected_files(run: Run) -> List[str]:
+    """Files under the workflow's `protect` paths that didn't exist when the run started."""
+    patterns = run.state.get("protect") or []
+    if not patterns:
+        return []
+    locked = set(run.state.get("locks", {}))
+    return [str(p) for p in protected_files(run.project, patterns) if str(p) not in locked]
+
+
 def tracked_run_files(run: Run) -> List[str]:
     """Files of this run that git tracks. `.gated/.gitignore` keeps them out, but `git add -f` gets
     past it, and a run's to-do list or ledger then lands in the pull request (seen live)."""
@@ -629,9 +644,13 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
                         "summary": "split stories that don't resolve on GitHub: "
                         + "; ".join(f"{x['url']} ({x.get('check') or x['why']})" for x in unverified)})
     changed = G.changed_locks(run)
-    if changed:
+    added = new_protected_files(run)
+    if changed or added:
+        parts = (["locked files changed since they were locked: " + ", ".join(changed)] if changed else []) + (
+            ["new files under the workflow's protected paths: " + ", ".join(added[:5])] if added else [])
         results.append({"id": "locks", "type": "locks", "ok": False, "at": now(), "log": "",
-                        "summary": "locked files changed since they were locked: " + ", ".join(changed)})
+                        "summary": "; ".join(parts) + (". Protected paths change in their own change, outside a run"
+                                                        if added else "")})
     tracked = tracked_run_files(run)
     if tracked:
         results.append({"id": "run-files", "type": "run-files", "ok": False, "at": now(), "log": "",

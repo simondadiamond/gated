@@ -47,6 +47,7 @@ Run `gated lint <name>` after every change.
 | `skills` | Skills every checkpoint's subagent must load. A checkpoint can list its own `skills` too. |
 | `storySkill` | The skill a step uses to create a new story when it splits work off. Default: `gh issue create`. |
 | `shares` | Folders, relative to this one, whose files the workflow uses (shared steps, rubrics, check scripts). They're locked with the workflow for the whole run. Lets several workflows, like a lite and a full path, share one set of checks. |
+| `protect` | Paths in the project, as folders or globs, that the gates trust but the workflow folder doesn't hold: a test config, a harness a check script reads, a helper in `scripts/`. Locked for the whole run like the workflow folder. The hooks refuse an edit or a new file under them, and the `locks` gate fails if one changes anyway. Keep the list small: every file is hashed at each stop. |
 | `basedOn` | Set by `gated customize`: which workflow this copy came from. |
 | `judge` | `claude` or `codex`: which CLI grades `judge` gates. Defaults to the harness running the workflow. |
 | `before` | Fixed checkpoints that run ahead of the `plan`, like writing acceptance criteria. Needs a `plan`. |
