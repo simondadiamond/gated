@@ -182,7 +182,12 @@ def judge_command(run: Run) -> Tuple[str, List[str]]:
     if harness == "codex":
         return "codex", ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "-"]
     # --tools "" removes built-in tools only; MCP servers stay unless --strict-mcp-config.
-    return "claude", ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config"]
+    # No setting sources, no skills and a one-line system prompt: the judge reads the rubric and
+    # inputs only, not CLAUDE.md, hooks or plugins. That drops about 24k tokens of fixed overhead
+    # per call (a measured $0.21 down to $0.01 on Opus) and keeps the subscription login working.
+    return "claude", ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config",
+                      "--setting-sources", "", "--disable-slash-commands",
+                      "--system-prompt", "You are an independent reviewer. Judge only from the message."]
 
 
 def clip(text: str, limit: int) -> Tuple[str, int]:

@@ -966,3 +966,13 @@ class CheckpointJudgeErrorTest(GatedCase):
             self.assertNotIn("one/review", self.run_obj().state["attempts"])
         runner.check(self.run_obj(), count_attempts=True)
         self.assertEqual(self.run_obj().state["attempts"]["one/review"], 1)
+
+
+class GateLogHistoryTest(GatedCase):
+    def test_a_gate_log_keeps_every_result(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        self.start()
+        runner.check(self.run_obj(), count_attempts=True)
+        runner.check(self.run_obj(), count_attempts=True)
+        log = (self.run_obj().dir / "one" / "gates" / "t.log").read_text()
+        self.assertEqual(log.count("FAIL"), 2)
