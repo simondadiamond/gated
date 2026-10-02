@@ -1049,3 +1049,236 @@ class GateLogHistoryTest(GatedCase):
         runner.check(self.run_obj(), count_attempts=True)
         log = (self.run_obj().dir / "one" / "gates" / "t.log").read_text()
         self.assertEqual(log.count("FAIL"), 2)
+
+
+class RunFilesTest(GatedCase):
+    def test_a_tracked_run_file_fails_the_checkpoint_until_untracked(self):
+        self.git_init()
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}], attempts=5)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        todo = run.dir / "one" / "todo.md"
+        subprocess.run(["git", "add", "-f", str(todo)], cwd=str(self.project), check=True)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, err)
+        self.assertIn("run-files", err)
+        self.assertEqual(self.run_obj().state["attempts"], {"one/run-files": 1})
+        subprocess.run(["git", "rm", "-q", "--cached", str(todo)], cwd=str(self.project), check=True)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done", err)
+
+    def test_files_tracked_outside_this_run_are_left_alone(self):
+        self.git_init()
+        kept = self.project / ".gated" / "notes.md"
+        kept.parent.mkdir(parents=True)
+        kept.write_text("a team keeps this on purpose")
+        subprocess.run(["git", "add", "-f", str(kept)], cwd=str(self.project), check=True)
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")
+
+
+class ProtectTest(GatedCase):
+    def protected_run(self):
+        (self.project / "config").mkdir()
+        (self.project / "config" / "test.cfg").write_text("strict = true\n")
+        (self.project / "harness").mkdir()
+        (self.project / "harness" / "proof.mjs").write_text("export const ok = 1\n")
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}],
+                             protect=["config/test.cfg", "harness/"])
+        return self.start(session="owner")
+
+    def write_call(self, path):
+        return self.hook("pretool", {"session_id": "owner", "agent_id": "sub", "tool_name": "Write",
+                                     "tool_input": {"file_path": str(path)}})
+
+    def test_edits_and_new_files_under_protected_paths_are_refused(self):
+        self.protected_run()
+        code, _, err = self.write_call(self.project / "config" / "test.cfg")
+        self.assertEqual(code, 2)
+        self.assertIn("protects", err)
+        code, _, err = self.write_call(self.project / "harness" / "new-helper.mjs")
+        self.assertEqual(code, 2, "a new file in a protected folder is refused too")
+        code, _, _ = self.write_call(self.project / "src.txt")
+        self.assertEqual(code, 0)
+
+    def test_a_change_that_slips_past_the_hook_fails_the_locks_gate(self):
+        run = self.protected_run()
+        self.todos_done(run)
+        (self.project / "harness" / "proof.mjs").write_text("export const ok = 0\n")
+        (self.project / "harness" / "extra.mjs").write_text("x\n")
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, err)
+        self.assertIn("locked files changed", err)
+        self.assertIn("extra.mjs", err)
+
+    def test_protected_files_cannot_be_relocked(self):
+        self.protected_run()
+        code, _, err = self.gated("relock", "config/test.cfg", "--reason", "want looser tests")
+        self.assertEqual(code, 1)
+        self.assertIn("can't be relocked", err)
+
+    def test_protect_paths_must_stay_inside_the_project(self):
+        from gated_lib.core import lint_workflow
+        base = {"name": "x", "description": "d", "checkpoints": [{"id": "a", "step": "s.md"}]}
+        for bad in (["/etc/passwd"], ["../other"], [".gated/runs"], "harness"):
+            self.assertTrue(any("protect" in e for e in lint_workflow({**base, "protect": bad}, None)), bad)
+        self.assertFalse(any("protect" in e for e in lint_workflow({**base, "protect": ["harness/", "*.cfg"]}, None)))
+
+
+class JudgeDecisionTest(GatedCase):
+    def judge_script(self, answered_marker):
+        # Asks once; once the person's answer is in the prompt, passes.
+        prompt = self.tmp / "prompt"
+        return (f"cat > {prompt}; if grep -q '{answered_marker}' {prompt}; then echo 'VERDICT: PASS'; "
+                "else echo 'VERDICT: DECISION Should group managers see the panel?'; fi")
+
+    def test_a_checkpoint_decision_asks_the_person_and_spends_no_attempt(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = self.judge_script("only managers")
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=2, decisions=True)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, "held once so the agent puts the question to the person")
+        self.assertIn("Should group managers see the panel?", err)
+        self.assertEqual(self.hook("stop", {"session_id": "owner"})[0], 0, "then the turn ends, still no attempt")
+        run = self.run_obj()
+        self.assertEqual(run.status, "waiting")
+        self.assertIn("Should group managers see the panel?", run.state["question"]["text"])
+        self.assertEqual(run.state["attempts"], {})
+        self.hook("prompt", {"session_id": "owner", "prompt": "No, only managers for now."})
+        self.assertEqual(self.run_obj().status, "running")
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")
+        self.assertIn("Decisions the person made in this run", (self.tmp / "prompt").read_text())
+
+    def test_asking_an_answered_decision_again_is_a_fail(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: DECISION Should group managers see the panel?'"
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3, decisions=True)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.hook("prompt", {"session_id": "owner", "prompt": "No."})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, err)
+        self.assertIn("already made", err)
+        self.assertEqual(self.run_obj().state["attempts"], {"one/review": 1})
+
+    def test_other_failing_gates_still_spend_an_attempt(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: DECISION Which roles?'"
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"},
+                              {"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3, decisions=True)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertIn("also failed and spent an attempt: t", err)
+        run = self.run_obj()
+        self.assertEqual((run.status, run.state["attempts"]), ("waiting", {"one/t": 1}))
+
+    def test_a_plan_judge_decision_keeps_the_plan_and_asks(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = self.judge_script("read-only")
+        self.workflow("judged", {"decisions": True, "plan": {"step": "plan.md", "approval": "judge", "rubric": "rubric.md"}},
+                      {"plan.md": "Plan it.", "rubric.md": "Approve a sound plan."})
+        run = self.start("judged")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "build", "title": "Build", "instructions": "Build it", "gates": []}]}))
+        self.submit_plan()
+        may_stop, message = runner.check(self.run_obj())
+        self.assertTrue(may_stop)
+        run = self.run_obj()
+        self.assertEqual(run.status, "waiting")
+        self.assertNotIn("plan", run.state["attempts"])
+        self.hook("prompt", {"session_id": "s1", "prompt": "read-only for them"})
+        self.assertEqual(self.run_obj().status, "awaiting-approval")
+        runner.check(self.run_obj())
+        self.assertEqual(self.run_obj().status, "running")
+
+
+class HumanPlanGatesTest(GatedCase):
+    def test_plan_gates_refuse_a_submission_before_the_person_sees_it(self):
+        plan = {"step": "plan.md", "gates": [{"id": "ledger", "type": "command", "run": "test -f {{run}}/ledger.md"}]}
+        self.workflow("story", {"plan": plan}, {"plan.md": "Plan it."})
+        run = self.start("story")
+        (run.dir / "checkpoints.json").write_text(json.dumps({
+            "notes": ["AC-3 contradicted the story; now says the request is refused"],
+            "checkpoints": [{"id": "build", "title": "Build", "instructions": "Build it", "gates": []}]}))
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 1)
+        self.assertIn("fails its gates", err)
+        self.assertEqual(self.run_obj().status, "planning")
+        (run.dir / "ledger.md").write_text("ok")
+        code, out, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+        self.assertIn("AC-3 contradicted the story", out)
+        self.assertEqual(self.run_obj().status, "awaiting-approval")
+
+
+class DecisionsOffByDefaultTest(GatedCase):
+    def test_without_opt_in_the_judge_is_not_offered_decisions_and_sees_no_answers(self):
+        import os
+        prompt = self.tmp / "prompt"
+        os.environ["GATED_JUDGE_CMD"] = f"cat > {prompt}; echo 'VERDICT: DECISION Which roles?'"
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=5)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertEqual(self.run_obj().status, "running", "a workflow that didn't opt in never waits on a person")
+        self.assertIn("doesn't allow", err)
+        self.assertNotIn("VERDICT: DECISION", prompt.read_text())
+        self.assertNotIn("Decisions the person made", prompt.read_text())
+
+
+class ProtectHardeningTest(GatedCase):
+    def test_files_git_ignores_never_fail_the_locks_gate(self):
+        self.git_init()
+        (self.project / ".gitignore").write_text("__pycache__/\n")
+        (self.project / "harness").mkdir()
+        (self.project / "harness" / "proof.py").write_text("x = 1\n")
+        self.simple_workflow([{"id": "t", "type": "command", "run": "mkdir -p harness/__pycache__ && touch harness/__pycache__/proof.pyc"}],
+                             protect=["harness/"])
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done", "a cache the suite writes isn't a change to protected code")
+
+    def test_a_broad_glob_never_covers_the_run_folder(self):
+        from gated_lib.core import is_protected, protected_files
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}], protect=["**/*.json"])
+        run = self.start(session="owner")
+        self.assertFalse(any(".gated" in str(p) for p in protected_files(self.project, ["**/*.json"])))
+        self.assertFalse(is_protected(self.project, ["**/*.json"], run.dir / "checkpoints.json"))
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")
+
+    def test_hook_and_gate_read_a_glob_the_same_way(self):
+        from gated_lib.core import is_protected
+        p = self.project
+        self.assertTrue(is_protected(p, ["*.config.js"], p / "jest.config.js"))
+        self.assertFalse(is_protected(p, ["*.config.js"], p / "src" / "a" / "new.config.js"), "* stays in one folder")
+        self.assertTrue(is_protected(p, ["**/x.cfg"], p / "x.cfg"), "**/ also matches the top level")
+        self.assertTrue(is_protected(p, ["**/x.cfg"], p / "a" / "b" / "x.cfg"))
+        self.assertTrue(is_protected(p, ["harness"], p / "harness" / "lib" / "a.mjs"))
+
+    def test_a_common_name_in_a_protected_folder_does_not_refuse_unrelated_commands(self):
+        (self.project / "harness").mkdir()
+        (self.project / "harness" / "index.ts").write_text("x\n")
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}], protect=["harness/"])
+        self.start(session="owner")
+        code, _, err = self.hook("pretool", {"session_id": "owner", "agent_id": "sub", "tool_name": "Bash",
+                                             "tool_input": {"command": "sed -i '' s/a/b/ src/index.ts"}})
+        self.assertEqual(code, 0, err)
+
+    def test_protecting_the_whole_project_is_refused(self):
+        from gated_lib.core import lint_workflow
+        base = {"name": "x", "description": "d", "checkpoints": [{"id": "a", "step": "s.md"}]}
+        for bad in (["."], ["**"], ["*"]):
+            self.assertTrue(any("whole project" in e for e in lint_workflow({**base, "protect": bad}, None)), bad)

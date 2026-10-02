@@ -145,6 +145,8 @@ def lint_judge_options(value: Dict[str, Any], where: str, wdir: Optional[Path], 
         errors.append(f"{where}: maxChars must be an integer >= 1000")
     if "timeout" in value and not (type(value["timeout"]) is int and value["timeout"] > 0):
         errors.append(f"{where}: timeout must be a positive integer")
+    if "decisions" in value and not isinstance(value["decisions"], bool):
+        errors.append(f"{where}: decisions must be true or false")
     inputs = value.get("inputs", [])
     if not isinstance(inputs, list):
         errors.append(f"{where}: inputs must be a list of objects with either 'run' or 'file'")
@@ -258,6 +260,8 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
     for key in ("storySkill", "basedOn"):
         if key in data and not (isinstance(data[key], str) and data[key].strip()):
             errors.append(f"'{key}' must be a non-empty string")
+    if "decisions" in data and not isinstance(data["decisions"], bool):
+        errors.append("'decisions' must be true or false")
     if "freshContext" in data and not isinstance(data["freshContext"], bool):
         errors.append("'freshContext' must be true or false")
     shares = data.get("shares", [])
@@ -267,6 +271,16 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
         for s in shares:
             if not (wdir / s).is_dir():
                 errors.append(f"shared folder {s} does not exist")
+    protect = data.get("protect", [])
+    if not (isinstance(protect, list) and all(isinstance(p, str) and p.strip() for p in protect)):
+        errors.append("'protect' must be a list of paths or globs, relative to the project")
+    else:
+        for p in protect:
+            parts = Path(p).parts
+            if Path(p).is_absolute() or ".." in parts or (parts and parts[0] in NEVER_PROTECTED):
+                errors.append(f"protect path {p} must be inside the project, and not under .git or .gated")
+            elif p.strip().strip("/") in (".", "*", "**", "**/*"):
+                errors.append(f"protect path {p} covers the whole project; list the paths the gates trust")
     if "judge" in data and data["judge"] not in ("claude", "codex"):
         errors.append("'judge' must be \"claude\" or \"codex\"")
     plan = data.get("plan")
@@ -535,6 +549,73 @@ def resolve_run(project: Path, run_id: Optional[str] = None, finished: bool = Fa
     if not active:
         raise GatedError("no active run here. Start one with `gated start <workflow>`.")
     raise GatedError("several runs are active; pass --run <id>: " + ", ".join(r.id for r in active))
+
+
+NEVER_PROTECTED = (".git", ".gated")
+
+
+def glob_regex(pattern: str) -> "re.Pattern[str]":
+    """One meaning for a protect glob, in the hook and in the gate: `*` and `?` stay inside one
+    folder, `**` crosses folders (`**/x` also matches a top-level `x`), and a plain path also
+    covers everything under it."""
+    p = pattern.strip().rstrip("/")
+    out, i = "", 0
+    while i < len(p):
+        if p.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif p.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif p[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif p[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(p[i]), i + 1
+    return re.compile(r"^" + out + r"(?:/.*)?$")
+
+
+def git_lines(project: Path, args: List[str], timeout: int = 30) -> Optional[List[str]]:
+    """`git -C <project> <args>` as lines, or None when git is missing, slow or fails."""
+    import subprocess
+
+    try:
+        p = subprocess.run(["git", "-C", str(project), *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return [line for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else None
+
+
+def in_git_repo(project: Path) -> bool:
+    return git_lines(project, ["rev-parse", "--is-inside-work-tree"]) == ["true"]
+
+
+def is_protected(project: Path, patterns: List[str], path: Path) -> bool:
+    """Does a path, existing or not yet, fall under a `protect` entry? Never the run's own files."""
+    try:
+        rel = Path(path).resolve().relative_to(Path(project).resolve()).as_posix()
+    except ValueError:
+        return False
+    if rel.split("/")[0] in NEVER_PROTECTED:
+        return False
+    return any(glob_regex(p).match(rel) for p in patterns)
+
+
+def protected_files(project: Path, patterns: List[str]) -> List[Path]:
+    """Files under a workflow's `protect` entries. In a git repository, tracked files plus untracked
+    ones git doesn't ignore, so build output and caches never count; elsewhere, a walk that skips
+    .git and .gated."""
+    if not patterns:
+        return []
+    root = Path(project).resolve()
+    listed = git_lines(root, ["ls-files", "-co", "--exclude-standard"]) if in_git_repo(root) else None
+    if listed is None:
+        listed = []
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in NEVER_PROTECTED]
+            base = Path(folder).relative_to(root)
+            listed += [(base / f).as_posix() for f in files]
+    found = [root / rel for rel in listed if is_protected(root, patterns, root / rel)]
+    return sorted(p for p in found if p.is_file())
 
 
 def ignore_runs(project: Path) -> None:

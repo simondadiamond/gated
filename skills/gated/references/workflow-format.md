@@ -11,6 +11,7 @@ weekly-report/
   checks/*           scripts that gates call (optional)
   rubrics/*.md       rubrics for judge gates (optional)
   learnings.md       feedback from past runs; `gated learn` appends to it
+  health.json        gates a person reviewed and kept; `gated health --dismiss` writes it
 ```
 
 Run `gated lint <name>` after every change.
@@ -44,9 +45,11 @@ Run `gated lint <name>` after every change.
 | `attempts` | How many failed stop attempts a gate gets before the run is `blocked`. Default 5. A gate can set its own. |
 | `commit` | `true` commits the project once per passed checkpoint. For code workflows. |
 | `freshContext` | `false` turns off the fresh-subagent rule. Default `true`. |
+| `decisions` | `true` lets judges return a decision for the person instead of a verdict. Default `false`. See "Gates". |
 | `skills` | Skills every checkpoint's subagent must load. A checkpoint can list its own `skills` too. |
 | `storySkill` | The skill a step uses to create a new story when it splits work off. Default: `gh issue create`. |
 | `shares` | Folders, relative to this one, whose files the workflow uses (shared steps, rubrics, check scripts). They're locked with the workflow for the whole run. Lets several workflows, like a lite and a full path, share one set of checks. |
+| `protect` | Paths in the project, as folders or globs, that the gates trust but the workflow folder doesn't hold: a test config, a harness a check script reads, a helper in `scripts/`. Locked for the whole run like the workflow folder. The hooks refuse an Edit or Write under them, including a new file; a change or new file made through the shell fails the `locks` gate at the next stop. In a git repository only tracked files and untracked ones git doesn't ignore count, so caches and build output never trip it. `*` and `?` stay inside one folder, `**` crosses folders, and a plain path covers everything under it. `.git` and `.gated` are never protected. A merge or rebase that changes a protected file fails the run, so bring the base branch in before starting. |
 | `basedOn` | Set by `gated customize`: which workflow this copy came from. |
 | `judge` | `claude` or `codex`: which CLI grades `judge` gates. Defaults to the harness running the workflow. |
 | `before` | Fixed checkpoints that run ahead of the `plan`, like writing acceptance criteria. Needs a `plan`. |
@@ -131,14 +134,20 @@ Amendments always require a person, even when plan approval uses a judge.
 
 Two more plan options:
 
-- `gates`: command or file gates that run on the submitted plan before the
-  judge does. When one fails, the plan goes back to the planner with the
-  output, and no judge call is paid. Put every check a script can decide here
-  (a ledger's format, a criteria file's headings).
+- `gates`: command or file gates that run on the submitted plan before anyone
+  reviews it. With a judge, they run at the stop, and a failure sends the plan
+  back to the planner with no judge call paid. With a person, `gated
+  submit-plan` runs them and refuses a plan that fails, so the person never
+  sees it. Put every check a script can decide here (a ledger's format, a
+  criteria file's headings, every criterion covered by some checkpoint).
 - `lock`: files that freeze when the plan is approved, like
   `["{{run}}/acceptance.md"]`. The planner can still edit them before approval.
   After it, a change fails the `locks` gate unless it goes through
   `gated relock <file> --reason "..."` and the person's approve.
+
+A plan file can also carry `"notes"`, a list of lines for whoever approves it,
+like a criterion the planner amended and why. `gated submit-plan` prints them
+with the plan summary, and a plan judge reads them in the plan file.
 
 `gated amend <file>` adds checkpoints in the same shape to a running or
 finished run, and also needs approval.
@@ -163,6 +172,16 @@ an outside system can set `pendingExit` to an exit code from 1 to 255, except
 pending longer than `pendingMax` seconds, 21600 by default, it becomes a normal
 failure. These fields are allowed only on command gates.
 
+A judge ends with `VERDICT: PASS` or `VERDICT: FAIL`. With `"decisions": true`
+on the workflow (or on one judge gate, or on `plan`), a judge may also end with
+`VERDICT: DECISION <question>` when the verdict hinges on a choice only a
+person can make. A decision pauses the run as `waiting` with that question and
+spends no attempt (a plan stays submitted); the stop hook holds the turn once
+so the agent puts the question to the person. Every later judge call in the
+run receives the person's answers. Asking again a question already answered
+counts as a FAIL. Leave it off for unattended workflows: without it a judge is
+never offered the choice, and a DECISION it returns anyway is a judge error.
+
 A judge input uses its own `maxChars`, then the judge gate's `maxChars`, then
 200000 by default. The value must be an integer of at least 1000. Oversized
 inputs keep their beginning and end, mark how much was cut from the middle,
@@ -184,6 +203,10 @@ and report the cut in the gate summary.
 ```
 
 Starting a run writes `.gated/.gitignore`, so run folders never show up in git.
+`git add -f` gets past it, so in a git repository every checkpoint also
+checks that no file of the current run is tracked (`run-files`). A tracked
+to-do list or ledger fails the checkpoint until a new commit removes it with
+`git rm --cached`.
 
 ## Statuses
 
@@ -192,7 +215,7 @@ Starting a run writes `.gated/.gitignore`, so run folders never show up in git.
 | `planning` | a planner is writing the checkpoints | blocks until a plan is submitted |
 | `awaiting-approval` | a plan or amendment waits for the person | lets the turn end |
 | `running` | a checkpoint is in progress | blocks while gates fail |
-| `waiting` | only a `human` gate is left, or the agent asked the person something with `gated ask` | lets the turn end without spending an attempt |
+| `waiting` | only a `human` gate is left, the agent asked the person something with `gated ask`, or a judge needs a decision | lets the turn end without spending an attempt |
 | `blocked` | a gate used all its attempts, or `state.json` changed outside gated | lets the turn end; the person types `approve` to grant fresh attempts after `gated resume` |
 | `done` | every checkpoint passed | lets the turn end |
 | `cancelled` | the person typed `cancel run` | lets the turn end |
@@ -208,6 +231,20 @@ Splits are checked. The Stop hook runs `gh issue view` on every URL in a
 checkpoint's `splits.md`, and a URL that doesn't resolve fails the
 checkpoint, so scope can't be dropped by claiming a story that doesn't exist.
 The report lists verified splits under "Split into new stories".
+
+Every stop records each gate's result in `state.json` (`history`): pass or
+fail, a short reason, the criteria a judge marked NOT MET, what a Claude judge
+call cost, and a fingerprint of the work it judged. Advisory `gated check`
+results aren't recorded; their log lines are marked `(check)`. `gated health`
+reads the history across runs and flags gates worth changing: one that blocked
+a run, failed 3 or more times in one run, changed its verdict on unchanged
+work (same commit, same uncommitted changes, same file inputs), failed on the
+same NOT MET criterion in 2 or more runs, or asked the person for a decision
+twice. The history keeps a run's last 2000 results. A gate that failed once or twice and then passed is the
+workflow doing its job, and isn't flagged. `gated health --dismiss <gate>
+--reason "..."` records that a person kept a flagged gate as it is, in the
+workflow's `health.json`; the gate is flagged again only for failures after
+that. Like `learnings.md`, `health.json` isn't locked during a run.
 
 Findings aren't gates. The Stop hook records each `- ` line in a checkpoint's
 `noticed.md` once, the report lists them under "Found, not fixed", and

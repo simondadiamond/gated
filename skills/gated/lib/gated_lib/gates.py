@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -16,7 +18,7 @@ LOG_TAIL = 4000
 URL_RE = re.compile(r"https?://[^\s)<>\]\"'`]+")
 TODO_RE = re.compile(r"^\s*[-*]\s+\[( |x|X)\]\s*(.*)$")
 STRUCK_RE = re.compile(r"^~~.+?~~\s*(?:[-:–—]\s*)?(\S.*)$")
-VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)\b", re.IGNORECASE)
+VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL|DECISION)\b[ \t:]*([^\n]*)", re.IGNORECASE)
 
 JUDGE_PREAMBLE = """You are an independent reviewer. You did not do this work and you share no \
 context with whoever did. Judge it only against the rubric below and the inputs that follow it. \
@@ -26,6 +28,20 @@ List every criterion from the rubric with MET or NOT MET and one line of evidenc
 NOT MET item you find in this one pass; don't stop at the first, because the work is fixed from your \
 list and judged again. Then end your reply with exactly one line, either `VERDICT: PASS` or `VERDICT: FAIL`.
 """
+
+# Added only when the workflow opts in with "decisions": true. Off by default, so an unattended
+# workflow never gains a way to stop and wait for a person.
+DECISION_PREAMBLE = """
+One exception. If the verdict hinges on a choice only a person can make (what is in scope, who gets \
+access, a product trade-off) and neither the inputs nor the decisions listed below settle it, end \
+instead with `VERDICT: DECISION <the question, in one line>`. The run pauses and asks the person; \
+their answer comes back to you. Don't use it for anything the inputs can settle, and don't ask a \
+question the decisions below already answer.
+"""
+
+
+def decisions_enabled(run: Run, gate: Dict[str, Any]) -> bool:
+    return bool(gate.get("decisions", run.workflow().get("decisions", False)))
 
 
 def result(gate: Dict[str, Any], ok: bool, summary: str, log: str = "") -> Dict[str, Any]:
@@ -186,7 +202,8 @@ def judge_command(run: Run) -> Tuple[str, List[str]]:
     # No setting sources, no skills and a one-line system prompt: the judge reads the rubric and
     # inputs only, not CLAUDE.md, hooks or plugins. That drops about 24k tokens of fixed overhead
     # per call (a measured $0.21 down to $0.01 on Opus) and keeps the subscription login working.
-    return "claude", ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config",
+    # JSON output carries what the call cost; check_judge reads the reply from its "result".
+    return "claude", ["claude", "-p", "--output-format", "json", "--tools", "", "--strict-mcp-config",
                       "--setting-sources", "", "--disable-slash-commands",
                       "--system-prompt", "You are an independent reviewer. Judge only from the message."]
 
@@ -204,8 +221,10 @@ def clip(text: str, limit: int) -> Tuple[str, int]:
 def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str, Any]:
     ctx = run.ctx(cp)
     rubric = render((run.workflow_dir / gate["rubric"]).read_text(), ctx) if (run.workflow_dir / gate["rubric"]).is_file() else render(gate["rubric"], ctx)
-    parts = [JUDGE_PREAMBLE, "## Rubric\n", rubric, "\n## Inputs\n"]
+    decisions = decisions_enabled(run, gate)
+    parts = [JUDGE_PREAMBLE + (DECISION_PREAMBLE if decisions else ""), "## Rubric\n", rubric, "\n## Inputs\n"]
     cuts = []
+    files_seen = hashlib.sha256()
     for inp in gate.get("inputs", []):
         limit = inp.get("maxChars", gate.get("maxChars", 200000))
         if "run" in inp:
@@ -217,25 +236,34 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
         else:
             p = resolve_path(run, inp["file"], cp)
             raw = p.read_text(errors="replace") if p.is_file() else "(file does not exist)"
+            files_seen.update(raw.encode())
             body, cut = clip(raw, limit)
             label = str(p)
             parts.append(f"### {p}\n```\n{body}\n```\n")
         if cut:
             cuts.append(f"{label} by {cut} chars")
     cut_suffix = " (cut: " + "; ".join(cuts) + ")" if cuts else ""
+    answers = run.state.get("answers", []) if decisions else []
+    if answers:
+        parts.append("## Decisions the person made in this run\n")
+        parts += [f"- Q: {a['question']}\n  A: {a['answer']}" for a in answers]
     prompt = "\n".join(parts)
     key = f"{cp['id']}/{gate['id']}"
     digest = sha256_text(prompt)
     cached = run.state.setdefault("judgeCache", {}).get(key)
     if cached and cached.get("hash") == digest:
-        return result(gate, cached["ok"], cached["summary"] + " (cached: inputs unchanged)", cached.get("log", ""))
+        hit = result(gate, cached["ok"], cached["summary"] + " (cached: inputs unchanged)", cached.get("log", ""))
+        hit.update({"cached": True, "files": files_seen.hexdigest()[:16]})
+        return hit
     kind, argv = judge_command(run)
     env = dict(os.environ)
     for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
         env.pop(var, None)
     try:
         p = subprocess.run(argv, cwd=str(run.project), input=prompt, capture_output=True, text=True, timeout=gate.get("timeout", 900), env=env)
-        out = (p.stdout or "") + (p.stderr or "")
+        reply, cost = judge_reply(kind, p.stdout or "")
+        # Claude's JSON reply has no trailing newline: keep stderr off the verdict line.
+        out = reply.rstrip("\n") + "\n" + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return judge_error(gate, f"the {kind} judge timed out" + cut_suffix)
     except FileNotFoundError:
@@ -243,10 +271,59 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
     verdicts = VERDICT_RE.findall(out)
     if not verdicts:
         return judge_error(gate, f"the {kind} judge gave no VERDICT line" + cut_suffix, out)
-    ok = verdicts[-1].upper() == "PASS"
+    verdict, rest = verdicts[-1][0].upper(), verdicts[-1][1].strip()
+    if verdict == "DECISION" and not decisions:
+        return judge_error(gate, f"the {kind} judge answered DECISION, which this workflow doesn't allow" + cut_suffix, out)
+    if verdict == "DECISION":
+        question = rest or "(the judge asked for a decision without stating it)"
+        asked = {a["question"].split(": ", 1)[-1].strip().lower() for a in answers}
+        if question.lower() in asked:
+            # Asked and answered already: the answer was in the prompt. Treat it as the FAIL it is.
+            return result(gate, False, f"{kind} judge: FAIL (asked again a decision the person already made: {question})"
+                          + cut_suffix, out)
+        decided = result(gate, False, f"{kind} judge needs a decision: {question}" + cut_suffix, out)
+        decided.update({"decision": question, "cost": cost, "files": files_seen.hexdigest()[:16]})
+        return decided
+    ok = verdict == "PASS"
     summary = f"{kind} judge: {'PASS' if ok else 'FAIL'}" + cut_suffix
     run.state["judgeCache"][key] = {"hash": digest, "ok": ok, "summary": summary, "log": out[-LOG_TAIL:]}
-    return result(gate, ok, summary, out)
+    judged = result(gate, ok, summary, out)
+    judged.update({"cost": cost, "notMet": not_met(out) if not ok else [], "files": files_seen.hexdigest()[:16]})
+    return judged
+
+
+def judge_reply(kind: str, stdout: str) -> Tuple[str, Optional[float]]:
+    """Claude's JSON output wraps the reply with what the call cost. Anything else is the reply."""
+    if kind == "claude":
+        try:
+            data = json.loads(stdout)
+        except ValueError:
+            return stdout, None
+        if isinstance(data, dict) and "result" in data:
+            cost = data.get("total_cost_usd")
+            return str(data.get("result") or ""), float(cost) if isinstance(cost, (int, float)) else None
+    return stdout, None
+
+
+def not_met(out: str) -> List[str]:
+    """The rubric criteria a judge marked NOT MET, as short labels: the reasons health groups by.
+    A label is the text before "NOT MET" on a line where it comes early (a criterion heading),
+    cut at its first colon unless it reads "criterion N", without numbering or markdown."""
+    labels: List[str] = []
+    for line in out.splitlines():
+        if not re.match(r"(?i)\s*(\*\*|[-*#>]|\d+\.|criterion\b)", line):
+            continue  # prose that mentions NOT MET, not a criterion heading
+        plain = re.sub(r"[*_`#>]", "", line).strip(" -\t")
+        at = plain.upper().find("NOT MET")
+        if at <= 0 or at > 80:
+            continue
+        label = plain[:at].strip(" .:-")
+        if not re.match(r"(?i)criterion\s+\d+\b", label) and ":" in label:
+            label = label.split(":", 1)[0]
+        label = re.sub(r"^\d+\.?\s*", "", label).strip(" .:-").lower()[:60]
+        if len(label) >= 2 and label not in labels:
+            labels.append(label)
+    return labels[:10]
 
 
 def activity_path(run: Run) -> Path:

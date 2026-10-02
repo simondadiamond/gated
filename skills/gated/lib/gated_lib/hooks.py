@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import runner
-from .core import FINISHED_STATUSES, SKILL_DIR, Run, locked, now, owned_run, record_owner, session_run_dir, take_claim
+from .core import (FINISHED_STATUSES, SKILL_DIR, Run, is_protected, locked, now, owned_run, record_owner,
+                   session_run_dir, take_claim)
 
 # The whole message must be an explicit approval, so a conversational "yes" or feedback is not approval.
 APPROVE_RE = re.compile(r"^\s*(approve|approved|lgtm|ship it)\s*[.!]*\s*$", re.IGNORECASE)
@@ -138,6 +139,10 @@ def stop(payload: Dict[str, Any]) -> Decision:
             # Hold the stop once, so the agent tells the person instead of going quiet. The next
             # stop finds the run finished and goes through without spending an attempt.
             return Decision(2, f"gated: {message}\nTell the person now: summarize {run.dir / 'report.md'} in a few lines, then stop.")
+        if run.status == "waiting" and before != "waiting" and (run.state.get("question") or {}).get("from") == "judge":
+            # Same for a judge's decision: hold once so the agent puts the question to the person.
+            # The next stop finds the run waiting and goes through without spending an attempt.
+            return Decision(2, f"gated: {message}")
     if may_stop:
         return Decision(stdout=json.dumps({"systemMessage": f"gated: {message}"}))
     return Decision(2, f"gated: {message}")
@@ -193,7 +198,13 @@ def guard(run: Run, payload: Dict[str, Any], tool: str, tool_input: Dict[str, An
         for s in strings(tool_input):
             for m in PATCH_FILE_RE.finditer(s):
                 targets.append(m.group(1) or m.group(2))
+    patterns = run.state.get("protect") or []
     for t in targets:
+        target = Path(t.strip()).expanduser()
+        target = (target if target.is_absolute() else cwd / target).resolve()
+        if patterns and is_protected(run.project, patterns, target):
+            return Decision(2, f"gated: {target} is under a path the workflow protects, because its gates trust that "
+                               f"code. Run {run.id} can't change it; it changes in its own change, outside a run.")
         p = hit(t)
         if p:
             return Decision(2, f"gated: {p} is locked by run {run.id}. The gates are checked against it, so it can't change. "
@@ -203,7 +214,11 @@ def guard(run: Run, payload: Dict[str, Any], tool: str, tool_input: Dict[str, An
     # Shell writes: deny a part of the command that both looks like a write and names a protected
     # file. Parts are judged one by one, so reading state while writing todo.md is fine. The rest of
     # the run folder is the step's own workspace. Hashes and the digest catch what this misses.
-    names = {"state.json", "activity.jsonl"} | {p.name for p in protected}
+    # Files locked by `protect` are left out: a protected folder holds common names (index.ts,
+    # package.json) and matching by name would refuse unrelated commands. The locks gate still
+    # catches a change to them at the next stop.
+    by_protect = set(run.state.get("protectLocked", []))
+    names = {"state.json", "activity.jsonl"} | {p.name for p in protected if str(p) not in by_protect}
     for segment in PIPELINE_RE.split(command_text(tool_input)):
         if not segment.strip() or is_gated_call(segment) or not writes(segment):
             continue
