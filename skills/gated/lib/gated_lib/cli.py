@@ -151,6 +151,12 @@ def cmd_customize(a: argparse.Namespace) -> str:
 
 def cmd_ask(a: argparse.Namespace) -> str:
     run = resolve_run(find_project(), a.run)
+    # The Stop hook only turns a question into a pause while the run is running or planning. Saved
+    # in any other status, it sat unread and paused the run much later, on a question long settled.
+    if run.status not in ("running", "planning"):
+        raise GatedError(f"the run is {run.status}, so a question can't pause it now. "
+                         + ("The plan's reviewer decides next: put the question in the plan's `questions` instead."
+                            if run.status == "awaiting-approval" else "Put it to the person directly."))
     runner.question_path(run).write_text(a.question.strip() + "\n")
     return ("Question saved. Put it to the person and end your turn: the run waits for their answer "
             "without spending an attempt.")
