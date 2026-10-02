@@ -31,6 +31,14 @@ def result(gate: Dict[str, Any], ok: bool, summary: str, log: str = "") -> Dict[
     return {"id": gate["id"], "type": gate["type"], "ok": ok, "summary": summary, "log": log[-LOG_TAIL:], "at": now()}
 
 
+def judge_error(gate: Dict[str, Any], summary: str, log: str = "") -> Dict[str, Any]:
+    """A judge that gave no verdict (timeout, missing binary, no VERDICT line). The work
+    wasn't judged, so callers that can retry shouldn't count it as a rejection."""
+    r = result(gate, False, summary, log)
+    r["error"] = True
+    return r
+
+
 def sh(command: str, cwd: Path, timeout: int, stdin: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> Tuple[Optional[int], str]:
     """Run a shell command. Returns (exit code or None on timeout, combined output)."""
     try:
@@ -223,12 +231,12 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
         p = subprocess.run(argv, cwd=str(run.project), input=prompt, capture_output=True, text=True, timeout=gate.get("timeout", 900), env=env)
         out = (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
-        return result(gate, False, f"the {kind} judge timed out" + cut_suffix)
+        return judge_error(gate, f"the {kind} judge timed out" + cut_suffix)
     except FileNotFoundError:
-        return result(gate, False, f"can't run the judge: `{argv[0]}` is not installed" + cut_suffix)
+        return judge_error(gate, f"can't run the judge: `{argv[0]}` is not installed" + cut_suffix)
     verdicts = VERDICT_RE.findall(out)
     if not verdicts:
-        return result(gate, False, f"the {kind} judge gave no VERDICT line" + cut_suffix, out)
+        return judge_error(gate, f"the {kind} judge gave no VERDICT line" + cut_suffix, out)
     ok = verdicts[-1].upper() == "PASS"
     summary = f"{kind} judge: {'PASS' if ok else 'FAIL'}" + cut_suffix
     run.state["judgeCache"][key] = {"hash": digest, "ok": ok, "summary": summary, "log": out[-LOG_TAIL:]}
