@@ -89,10 +89,13 @@ def skills_for(wf: Dict[str, Any], cp: Dict[str, Any]) -> List[str]:
     return out
 
 
-def definition_files(wdir: Path) -> List[Path]:
-    """Every file in the workflow folder except learnings.md: steps, rubrics and check scripts.
-    Locked for the whole run, so no gate can be loosened mid-run."""
-    return sorted(p for p in wdir.rglob("*") if p.is_file() and p.name != "learnings.md" and ".git" not in p.parts)
+def definition_files(wdir: Path, shares: Optional[List[str]] = None) -> List[Path]:
+    """Every file in the workflow folder and the folders it shares, except learnings.md: steps,
+    rubrics and check scripts. Locked for the whole run, so no gate can be loosened mid-run."""
+    files = set()
+    for folder in [wdir] + [(wdir / s).resolve() for s in shares or []]:
+        files |= {p for p in folder.rglob("*") if p.is_file() and p.name != "learnings.md" and ".git" not in p.parts}
+    return sorted(files)
 
 
 def lock(run: Run, paths: List[Path]) -> None:
@@ -147,7 +150,7 @@ def start(project: Path, name: str, args: List[str]) -> Run:
     }
     write_json(rdir / "state.json", state)
     run = Run(rdir)
-    lock(run, definition_files(wdir))
+    lock(run, definition_files(wdir, wf.get("shares")))
     if starts_running:
         activate(run)
     run.save()
@@ -275,6 +278,13 @@ def approve_awaiting(run: Run, text: str, by: str = "person") -> Optional[Dict[s
     run.state["approvals"].append({**stamp, "gate": "amendment" if amendment else "plan"})
     run.state.pop("planReview", None)
     run.state["status"] = "running"
+    if not amendment:
+        # What the plan was approved against (the acceptance criteria) freezes with it. A change after
+        # this goes through `gated relock`, with a reason and a person's approve.
+        frozen = [G.resolve_path(run, p, {}) for p in run.workflow().get("plan", {}).get("lock", [])]
+        frozen = [p for p in frozen if p.is_file()]
+        lock(run, frozen)
+        run.state["planLocked"] = sorted({*run.state.get("planLocked", []), *(str(p.resolve()) for p in frozen)})
     if run.state.get("current") is None:
         run.state["current"] = run.state.get("planAt") or 0
     activate(run)
@@ -519,8 +529,17 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         judge_approval = plan.get("approval", "human") == "judge" and not run.state.get("amendment")
         if not judge_approval:
             return True, "Waiting for the person to approve. They type `approve`, `reject` or `cancel run`."
+        plan_cp = {"id": "plan"}
+        # Code first: a plan whose own files fail a script never costs a judge call.
+        code_results = [G.evaluate(run, plan_cp, g) for g in plan.get("gates", [])]
+        code_failing = [r for r in code_results if not r["ok"]]
         if not move:
+            if code_failing:
+                return True, ("Submitted, but these plan gates fail, so the judge won't see it:\n"
+                              + "\n".join(f"- {r['id']}: {r['summary']}" for r in code_failing))
             return True, "Submitted. When you end your turn the stop hook has the judge review the plan."
+        for r in code_results:
+            write_log(run, plan_cp, r)
         inputs = plan.get("inputs")
         if inputs is None:
             inputs = [{"file": run.state["plan"]}]
@@ -531,9 +550,13 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         for key in ("maxChars", "timeout"):
             if key in plan:
                 gate[key] = plan[key]
-        plan_cp = {"id": "plan"}
-        review = G.check_judge(run, plan_cp, gate)
-        write_log(run, plan_cp, review)
+        if code_failing:
+            review = {"ok": False, "summary": "plan gates failed before the judge: "
+                      + "; ".join(f"{r['id']}: {r['summary']}" for r in code_failing),
+                      "log": "\n\n".join(f"{r['id']}:\n{r.get('log', '')[-1500:]}" for r in code_failing)}
+        else:
+            review = G.check_judge(run, plan_cp, gate)
+            write_log(run, plan_cp, review)
         errors = run.state.setdefault("judgeErrors", {})
         if review.get("error") and errors.get("plan", 0) + 1 < JUDGE_ERROR_RETRIES:
             # No verdict is not a rejection: keep the plan, spend no attempt, retry on the next stop.
@@ -557,7 +580,8 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         run.state["planReview"] = review_text
         run.state["status"] = "planning"
         run.save()
-        return False, ("The judge rejected the plan:\n" + review_text
+        who = "Its gates" if code_failing else "The judge"
+        return False, (f"{who} rejected the plan:\n" + review_text
                        + "\nHand it to a NEW planning subagent with `gated step`, then `gated submit-plan` again.")
     if run.status == "waiting" and run.state.get("relock"):
         req = run.state["relock"]
@@ -583,7 +607,10 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         unverified = collect_splits(run, cp)
     if move and run.state.get("unlocked"):
         lock(run, [Path(f) for f in run.state.pop("unlocked")])
-    results = [G.evaluate(run, cp, g) for g in cp["gates"]]
+    # A judge runs once per stop, where its verdict counts. An advisory check can't save a verdict
+    # (the agent's shell could fake one), so judging there paid for a call nobody kept.
+    deferred = [g for g in cp["gates"] if g["type"] == "judge"] if not move else []
+    results = [G.evaluate(run, cp, g) for g in cp["gates"] if g not in deferred]
     if unverified:
         results.append({"id": "splits", "type": "splits", "ok": False, "at": now(), "log": "",
                         "summary": "split stories that don't resolve on GitHub: "
@@ -628,6 +655,8 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     human = [r for r in results if not r["ok"] and r["type"] == "human"]
     if not move:
         sections = []
+        later = ("\n\nNot run here: " + ", ".join(g["id"] for g in deferred)
+                 + " (judge). Judges run only when you end your turn, and each verdict counts.") if deferred else ""
         if failing:
             lines = "\n".join(f"- {r['id']} ({r['type']}): {r['summary']}" for r in failing)
             sections.append(f"Failing gates:\n{lines}")
@@ -636,11 +665,13 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
             sections.append(f"Pending gates:\n{lines}")
         if sections:
             return not failing, (f"Checkpoint '{cp['id']}' isn't done. " + "\n\n".join(sections)
-                                 + f"\n\nFull logs: {run.dir / cp['id'] / 'gates'}")
+                                 + later + f"\n\nFull logs: {run.dir / cp['id'] / 'gates'}")
         if human:
-            return True, f"Checkpoint '{cp['id']}' passes its checks. End your turn: the stop hook confirms, then the person is asked."
-        return True, (f"Every gate on '{cp['id']}' passes. End your turn: the stop hook reruns the gates and moves "
-                      "the run on. Only the hook can advance a run.")
+            return True, (f"Checkpoint '{cp['id']}' passes its checks. End your turn: the stop hook confirms, "
+                          "then the person is asked." + later)
+        every = "Every other gate" if deferred else "Every gate"
+        return True, (f"{every} on '{cp['id']}' passes. End your turn: the stop hook reruns the gates and moves "
+                      "the run on. Only the hook can advance a run." + later)
     last_results = []
     for r in results:
         saved = {k: r[k] for k in ("id", "type", "ok", "summary", "at")}
@@ -704,11 +735,13 @@ def request_relock(run: Run, paths: List[str], reason: str) -> str:
     if not reason.strip():
         raise GatedError("say why the locked tests are wrong: `gated relock <file> --reason \"...\"`")
     red_files = {f for entry in run.state.get("red", {}).values() for f in entry.get("files", [])}
+    red_files |= set(run.state.get("planLocked", []))
     files = []
     for p in paths:
         full = str((run.project / p).resolve()) if not Path(p).is_absolute() else str(Path(p).resolve())
         if full not in red_files:
-            raise GatedError(f"{p} can't be relocked: only tests locked by `gated red` can, never workflow files")
+            raise GatedError(f"{p} can't be relocked: only tests locked by `gated red` and files the plan "
+                             "froze can, never workflow files")
         files.append(full)
     run.state["relock"] = {"files": files, "reason": reason.strip()[:1000], "at": now()}
     run.state["status"] = "waiting"
@@ -766,6 +799,11 @@ def step_brief(run: Run) -> str:
                "Order checkpoints from the smallest foundation to the most complex. Every checkpoint needs at "
                "least one gate that code can check. See references/writing-gates.md in the gated skill.",
                "Don't run `gated submit-plan`; the orchestrator does."]
+        plan_gates = wf["plan"].get("gates", [])
+        if plan_gates:
+            out += ["", "## Plan gates (code checks them before the judge sees the plan)"]
+            out += [f"- {g['id']}: `{render(g['run'], ctx)}` must exit 0" if g["type"] == "command"
+                    else f"- {g['id']}: {render(g['path'], ctx)} must exist" for g in plan_gates]
         if run.state.get("planReview"):
             out += ["", "## The last plan was rejected", run.state["planReview"]]
         if wf.get("checkpoints"):

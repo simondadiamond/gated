@@ -368,6 +368,53 @@ class JudgePlanApprovalTest(GatedCase):
         self.assertIn("by judge", runner.write_report(run).read_text())
         self.assertTrue((run.dir / "plan" / "gates" / "plan-review.log").is_file())
 
+    def test_plan_lock_freezes_criteria_at_approval_and_only_relock_changes_them(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: PASS'"
+        plan = {"step": "plan.md", "approval": "judge", "rubric": "rubric.md", "lock": ["{{run}}/acceptance.md"]}
+        self.workflow("judged", {"plan": plan}, {"plan.md": "Plan it.", "rubric.md": "Approve a sound plan."})
+        run = self.start("judged")
+        criteria = run.dir / "acceptance.md"
+        criteria.write_text("- AC-1: old\n")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "build", "title": "Build", "instructions": "Build it", "gates": []}]}))
+        self.submit_plan()
+        criteria.write_text("- AC-1: fixed before approval\n")  # the planner may still fix a criterion
+        runner.check(self.run_obj())
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(G.changed_locks(run), [])
+        criteria.write_text("- AC-1: quietly narrowed\n")
+        self.assertEqual(G.changed_locks(self.run_obj()), [str(criteria.resolve())])
+        code, _, err = self.gated("relock", str(criteria), "--reason", "the issue was edited")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.run_obj().status, "waiting")
+
+    def test_plan_gates_fail_before_the_judge_is_paid(self):
+        import os
+        marker = self.project / "judge-called"
+        os.environ["GATED_JUDGE_CMD"] = f"cat >/dev/null; touch {marker}; echo 'VERDICT: PASS'"
+        plan = {"step": "plan.md", "approval": "judge", "rubric": "rubric.md",
+                "gates": [{"id": "ledger", "type": "command", "run": "test -f {{run}}/ledger.md"}]}
+        self.workflow("judged", {"plan": plan}, {"plan.md": "Plan it.", "rubric.md": "Approve a sound plan."})
+        run = self.start("judged")
+        self.assertIn("ledger: `test -f", runner.step_brief(run))
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "build", "title": "Build", "instructions": "Build it", "gates": []}]}))
+        self.submit_plan()
+        _, message = runner.check(self.run_obj(), move=False)
+        self.assertIn("plan gates fail", message)
+        runner.check(self.run_obj())
+        run = self.run_obj()
+        self.assertFalse(marker.exists())
+        self.assertEqual((run.status, run.state["attempts"]["plan"]), ("planning", 1))
+        self.assertIn("ledger", run.state["planReview"])
+        (run.dir / "ledger.md").write_text("ok")
+        self.submit_plan()
+        runner.check(self.run_obj())
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.run_obj().status, "running")
+
     def test_judge_fail_returns_to_planning_with_review_and_attempt(self):
         run = self.make_run("FAIL")
         may_stop, message = runner.check(run)
@@ -524,6 +571,19 @@ class ReviewFindingsTest(GatedCase):
         self.assertEqual(run.state.get("judgeCache", {}), {})
         self.assertEqual(run.status, "running")
 
+    def test_advisory_check_never_calls_the_judge(self):
+        import os
+        marker = self.project / "judge-called"
+        gate = {"id": "review", "type": "judge", "rubric": "rubric.md"}
+        self.workflow("demo", {"checkpoints": [{"id": "one", "step": "one.md", "gates": [gate]}]}, {"one.md": "x", "rubric.md": "strict"})
+        run = self.start()
+        self.todos_done(run)
+        os.environ["GATED_JUDGE_CMD"] = f"cat >/dev/null; touch {marker}; echo 'VERDICT: FAIL'"
+        code, out, _ = self.gated("check")
+        self.assertFalse(marker.exists(), "an advisory check paid for a judge call nobody keeps")
+        self.assertEqual(code, 0)
+        self.assertIn("Not run here: review (judge)", out)
+
     def test_stray_run_file_does_not_disable_hooks(self):
         self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
         self.start(session="owner")
@@ -571,6 +631,19 @@ class ReviewFindingsTest(GatedCase):
             {"id": "t", "type": "command", "run": "sh {{workflow}}/checks/c.sh"}]}]}, {"s.md": "x", "checks/c.sh": "exit 1"})
         run = self.start()
         self.assertTrue(any(k.endswith("checks/c.sh") for k in run.state["locks"]))
+
+    def test_shared_folder_is_locked_with_the_workflow(self):
+        self.workflow("common", {"checkpoints": [{"id": "one", "step": "s.md", "gates": []}]},
+                      {"s.md": "x", "checks/c.sh": "exit 1"})
+        self.workflow("lite", {"shares": ["../common"], "checkpoints": [{"id": "one", "step": "../common/s.md", "gates": [
+            {"id": "t", "type": "command", "run": "sh {{workflow}}/../common/checks/c.sh"}]}]})
+        run = self.start("lite")
+        self.assertTrue(any(k.endswith("common/checks/c.sh") for k in run.state["locks"]))
+        self.assertIn("x", runner.step_brief(run))
+        self.workflow("broken", {"shares": ["../nowhere"], "checkpoints": [{"id": "one", "step": "../common/s.md", "gates": []}]})
+        code, _, err = self.gated("start", "broken")
+        self.assertEqual(code, 1)
+        self.assertIn("shared folder ../nowhere does not exist", err)
 
     def test_red_refuses_a_command_that_did_not_run(self):
         self.simple_workflow([{"id": "tests", "type": "red-first", "run": "no-such-runner", "lock": ["t_*.sh"]}])
