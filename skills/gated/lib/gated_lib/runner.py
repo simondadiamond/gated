@@ -247,6 +247,14 @@ def submit_plan(run: Run, path: Optional[Path] = None) -> str:
     head = run.state["checkpoints"][: run.state.get("planAt") or 0]
     run.state["checkpoints"] = head
     cps = read_plan(run, path)
+    plan = wf.get("plan", {})
+    if plan.get("approval", "human") != "judge" and plan.get("gates"):
+        # With a judge, plan gates run at the stop, before the judge is paid. With a person, they run
+        # here: a plan whose own files fail a script never reaches the person.
+        failing = [r for r in (G.evaluate(run, {"id": "plan"}, g) for g in plan["gates"]) if not r["ok"]]
+        if failing:
+            raise GatedError("the plan fails its gates, so it wasn't submitted:\n"
+                             + "\n".join(f"  - {r['id']}: {r['summary']}\n{r.get('log', '')[-800:]}" for r in failing))
     items = materialize(wf, run.workflow_dir, cps, planned=True)
     tail = materialize(wf, run.workflow_dir, wf.get("checkpoints", []), planned=False)
     run.state["checkpoints"] = head + items + tail
@@ -254,9 +262,13 @@ def submit_plan(run: Run, path: Optional[Path] = None) -> str:
     run.state["plan"] = str(snapshot(run, path, "plan"))
     run.state["status"] = "awaiting-approval"
     run.save()
-    questions = plan_questions(read_json(path))
+    data = read_json(path)
+    questions = plan_questions(data)
     asked = ("\n\nOpen questions from the planner:\n" + "\n".join(f"- {q}" for q in questions)) if questions else ""
-    return plan_summary(run.state["checkpoints"]) + asked
+    notes = [str(n) for n in data.get("notes", []) if str(n).strip()] if isinstance(data.get("notes"), list) else []
+    noted = ("\n\nNotes from the planner (for example, criteria it amended and why):\n"
+             + "\n".join(f"- {n}" for n in notes)) if notes else ""
+    return plan_summary(run.state["checkpoints"]) + noted + asked
 
 
 def amend(run: Run, path: Path) -> str:

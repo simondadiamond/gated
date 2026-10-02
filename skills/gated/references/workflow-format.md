@@ -132,14 +132,20 @@ Amendments always require a person, even when plan approval uses a judge.
 
 Two more plan options:
 
-- `gates`: command or file gates that run on the submitted plan before the
-  judge does. When one fails, the plan goes back to the planner with the
-  output, and no judge call is paid. Put every check a script can decide here
-  (a ledger's format, a criteria file's headings).
+- `gates`: command or file gates that run on the submitted plan before anyone
+  reviews it. With a judge, they run at the stop, and a failure sends the plan
+  back to the planner with no judge call paid. With a person, `gated
+  submit-plan` runs them and refuses a plan that fails, so the person never
+  sees it. Put every check a script can decide here (a ledger's format, a
+  criteria file's headings, every criterion covered by some checkpoint).
 - `lock`: files that freeze when the plan is approved, like
   `["{{run}}/acceptance.md"]`. The planner can still edit them before approval.
   After it, a change fails the `locks` gate unless it goes through
   `gated relock <file> --reason "..."` and the person's approve.
+
+A plan file can also carry `"notes"`, a list of lines for whoever approves it,
+like a criterion the planner amended and why. `gated submit-plan` prints them
+with the plan summary, and a plan judge reads them in the plan file.
 
 `gated amend <file>` adds checkpoints in the same shape to a running or
 finished run, and also needs approval.
