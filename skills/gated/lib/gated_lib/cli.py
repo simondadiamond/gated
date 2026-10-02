@@ -156,6 +156,11 @@ def cmd_ask(a: argparse.Namespace) -> str:
             "without spending an attempt.")
 
 
+def cmd_relock(a: argparse.Namespace) -> str:
+    with locked(resolve_run(find_project(), a.run).dir) as run:
+        return runner.request_relock(run, a.files, a.reason or "")
+
+
 def cmd_install(a: argparse.Namespace) -> str:
     path = install.install(a.harness)
     note = f"Added gated's hooks to {path}. They do nothing in sessions that don't own a run."
@@ -204,6 +209,9 @@ def parser() -> argparse.ArgumentParser:
     sp = add("lint", cmd_lint, "check a workflow definition", run_arg=False)
     sp.add_argument("workflow")
     add("list", cmd_list, "list workflows you can start", run_arg=False)
+    sp = add("relock", cmd_relock, "ask the person to unlock red-first tests the spec proved wrong")
+    sp.add_argument("files", nargs="+")
+    sp.add_argument("--reason", required=True)
     sp = add("ask", cmd_ask, "pause the run to ask the person something, without spending an attempt")
     sp.add_argument("question")
     sp = add("customize", cmd_customize, "copy a workflow into this project or ~/.claude/workflows to make it your own", run_arg=False)

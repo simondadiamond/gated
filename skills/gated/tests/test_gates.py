@@ -165,6 +165,15 @@ class JudgeTest(GatedCase):
         self.assertEqual(argv[tools + 1], "")
         self.assertIn("--strict-mcp-config", argv)
 
+    def test_claude_judge_loads_no_settings_claude_md_or_skills(self):
+        self.simple_workflow([])
+        run = self.start()
+        _, argv = G.judge_command(run)
+        sources = argv.index("--setting-sources")
+        self.assertEqual(argv[sources + 1], "")
+        self.assertIn("--system-prompt", argv)
+        self.assertIn("--disable-slash-commands", argv)
+
     def judge(self, script, rubric="Must mention cats."):
         import os
         os.environ["GATED_JUDGE_CMD"] = script
