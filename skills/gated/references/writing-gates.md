@@ -151,9 +151,10 @@ each push restarts them. Prefer gates that read evidence already on disk.
 **Ask the question once, early.** Some failures are decisions only a person can
 make: scope, which roles get access, a product trade-off. A judge that
 re-raises one as a FAIL every round costs a fix round each time, and no fix
-can settle it. Judges can end with `VERDICT: DECISION <question>` instead: the
-run asks the person, spends no attempt, and gives the answer to every later
-judge. A step that meets such a choice itself uses `gated ask`.
+can settle it. With `"decisions": true` in `workflow.json`, judges can end with
+`VERDICT: DECISION <question>` instead: the run asks the person, spends no
+attempt, and gives the answer to every later judge. Keep it off for workflows
+nobody watches. A step that meets such a choice itself uses `gated ask`.
 
 **Test the gate before the run.** Run each `checks/` script against two
 finished examples, one that should pass and one that should fail, before it

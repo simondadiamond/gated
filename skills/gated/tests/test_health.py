@@ -75,7 +75,7 @@ class HealthTest(GatedCase):
 
     def test_repeated_decisions_are_a_candidate(self):
         os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: DECISION Who sees the panel?'"
-        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}])
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], decisions=True)
         for session in ("s1", "s2"):
             run = self.start(session=session)
             self.todos_done(run)

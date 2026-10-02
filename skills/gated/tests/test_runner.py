@@ -1138,11 +1138,13 @@ class JudgeDecisionTest(GatedCase):
     def test_a_checkpoint_decision_asks_the_person_and_spends_no_attempt(self):
         import os
         os.environ["GATED_JUDGE_CMD"] = self.judge_script("only managers")
-        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=2)
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=2, decisions=True)
         run = self.start(session="owner")
         self.todos_done(run)
-        code, out, _ = self.hook("stop", {"session_id": "owner"})
-        self.assertEqual(code, 0)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, "held once so the agent puts the question to the person")
+        self.assertIn("Should group managers see the panel?", err)
+        self.assertEqual(self.hook("stop", {"session_id": "owner"})[0], 0, "then the turn ends, still no attempt")
         run = self.run_obj()
         self.assertEqual(run.status, "waiting")
         self.assertIn("Should group managers see the panel?", run.state["question"]["text"])
@@ -1156,7 +1158,7 @@ class JudgeDecisionTest(GatedCase):
     def test_asking_an_answered_decision_again_is_a_fail(self):
         import os
         os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: DECISION Should group managers see the panel?'"
-        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3)
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3, decisions=True)
         run = self.start(session="owner")
         self.todos_done(run)
         self.hook("stop", {"session_id": "owner"})
@@ -1170,18 +1172,19 @@ class JudgeDecisionTest(GatedCase):
         import os
         os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: DECISION Which roles?'"
         self.simple_workflow([{"id": "t", "type": "command", "run": "false"},
-                              {"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3)
+                              {"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3, decisions=True)
         run = self.start(session="owner")
         self.todos_done(run)
-        code, out, _ = self.hook("stop", {"session_id": "owner"})
-        self.assertEqual(code, 0)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertIn("also failed and spent an attempt: t", err)
         run = self.run_obj()
         self.assertEqual((run.status, run.state["attempts"]), ("waiting", {"one/t": 1}))
 
     def test_a_plan_judge_decision_keeps_the_plan_and_asks(self):
         import os
         os.environ["GATED_JUDGE_CMD"] = self.judge_script("read-only")
-        self.workflow("judged", {"plan": {"step": "plan.md", "approval": "judge", "rubric": "rubric.md"}},
+        self.workflow("judged", {"decisions": True, "plan": {"step": "plan.md", "approval": "judge", "rubric": "rubric.md"}},
                       {"plan.md": "Plan it.", "rubric.md": "Approve a sound plan."})
         run = self.start("judged")
         (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
@@ -1215,3 +1218,19 @@ class HumanPlanGatesTest(GatedCase):
         self.assertEqual(code, 0, err)
         self.assertIn("AC-3 contradicted the story", out)
         self.assertEqual(self.run_obj().status, "awaiting-approval")
+
+
+class DecisionsOffByDefaultTest(GatedCase):
+    def test_without_opt_in_the_judge_is_not_offered_decisions_and_sees_no_answers(self):
+        import os
+        prompt = self.tmp / "prompt"
+        os.environ["GATED_JUDGE_CMD"] = f"cat > {prompt}; echo 'VERDICT: DECISION Which roles?'"
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=5)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2)
+        self.assertEqual(self.run_obj().status, "running", "a workflow that didn't opt in never waits on a person")
+        self.assertIn("doesn't allow", err)
+        self.assertNotIn("VERDICT: DECISION", prompt.read_text())
+        self.assertNotIn("Decisions the person made", prompt.read_text())

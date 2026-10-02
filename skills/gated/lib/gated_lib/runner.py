@@ -640,7 +640,7 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
             if acceptance.is_file():
                 inputs.append({"file": str(acceptance)})
         gate = {"id": "plan-review", "type": "judge", "rubric": plan["rubric"], "inputs": inputs}
-        for key in ("maxChars", "timeout"):
+        for key in ("maxChars", "timeout", "decisions"):
             if key in plan:
                 gate[key] = plan[key]
         if code_failing:

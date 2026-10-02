@@ -26,13 +26,21 @@ Do not change any files. Be strict: a criterion that is not clearly met is not m
 List every criterion from the rubric with MET or NOT MET and one line of evidence. Report every \
 NOT MET item you find in this one pass; don't stop at the first, because the work is fixed from your \
 list and judged again. Then end your reply with exactly one line, either `VERDICT: PASS` or `VERDICT: FAIL`.
+"""
 
+# Added only when the workflow opts in with "decisions": true. Off by default, so an unattended
+# workflow never gains a way to stop and wait for a person.
+DECISION_PREAMBLE = """
 One exception. If the verdict hinges on a choice only a person can make (what is in scope, who gets \
 access, a product trade-off) and neither the inputs nor the decisions listed below settle it, end \
 instead with `VERDICT: DECISION <the question, in one line>`. The run pauses and asks the person; \
 their answer comes back to you. Don't use it for anything the inputs can settle, and don't ask a \
 question the decisions below already answer.
 """
+
+
+def decisions_enabled(run: Run, gate: Dict[str, Any]) -> bool:
+    return bool(gate.get("decisions", run.workflow().get("decisions", False)))
 
 
 def result(gate: Dict[str, Any], ok: bool, summary: str, log: str = "") -> Dict[str, Any]:
@@ -212,7 +220,8 @@ def clip(text: str, limit: int) -> Tuple[str, int]:
 def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str, Any]:
     ctx = run.ctx(cp)
     rubric = render((run.workflow_dir / gate["rubric"]).read_text(), ctx) if (run.workflow_dir / gate["rubric"]).is_file() else render(gate["rubric"], ctx)
-    parts = [JUDGE_PREAMBLE, "## Rubric\n", rubric, "\n## Inputs\n"]
+    decisions = decisions_enabled(run, gate)
+    parts = [JUDGE_PREAMBLE + (DECISION_PREAMBLE if decisions else ""), "## Rubric\n", rubric, "\n## Inputs\n"]
     cuts = []
     for inp in gate.get("inputs", []):
         limit = inp.get("maxChars", gate.get("maxChars", 200000))
@@ -231,7 +240,7 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
         if cut:
             cuts.append(f"{label} by {cut} chars")
     cut_suffix = " (cut: " + "; ".join(cuts) + ")" if cuts else ""
-    answers = run.state.get("answers", [])
+    answers = run.state.get("answers", []) if decisions else []
     if answers:
         parts.append("## Decisions the person made in this run\n")
         parts += [f"- Q: {a['question']}\n  A: {a['answer']}" for a in answers]
@@ -250,7 +259,8 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
     try:
         p = subprocess.run(argv, cwd=str(run.project), input=prompt, capture_output=True, text=True, timeout=gate.get("timeout", 900), env=env)
         reply, cost = judge_reply(kind, p.stdout or "")
-        out = reply + (p.stderr or "")
+        # Claude's JSON reply has no trailing newline: keep stderr off the verdict line.
+        out = reply.rstrip("\n") + "\n" + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return judge_error(gate, f"the {kind} judge timed out" + cut_suffix)
     except FileNotFoundError:
@@ -259,6 +269,8 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
     if not verdicts:
         return judge_error(gate, f"the {kind} judge gave no VERDICT line" + cut_suffix, out)
     verdict, rest = verdicts[-1][0].upper(), verdicts[-1][1].strip()
+    if verdict == "DECISION" and not decisions:
+        return judge_error(gate, f"the {kind} judge answered DECISION, which this workflow doesn't allow" + cut_suffix, out)
     if verdict == "DECISION":
         question = rest or "(the judge asked for a decision without stating it)"
         asked = {a["question"].split(": ", 1)[-1].strip().lower() for a in answers}
