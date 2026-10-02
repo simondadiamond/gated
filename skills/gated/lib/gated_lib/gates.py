@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -192,7 +193,8 @@ def judge_command(run: Run) -> Tuple[str, List[str]]:
     # No setting sources, no skills and a one-line system prompt: the judge reads the rubric and
     # inputs only, not CLAUDE.md, hooks or plugins. That drops about 24k tokens of fixed overhead
     # per call (a measured $0.21 down to $0.01 on Opus) and keeps the subscription login working.
-    return "claude", ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config",
+    # JSON output carries what the call cost; check_judge reads the reply from its "result".
+    return "claude", ["claude", "-p", "--output-format", "json", "--tools", "", "--strict-mcp-config",
                       "--setting-sources", "", "--disable-slash-commands",
                       "--system-prompt", "You are an independent reviewer. Judge only from the message."]
 
@@ -238,14 +240,17 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
     digest = sha256_text(prompt)
     cached = run.state.setdefault("judgeCache", {}).get(key)
     if cached and cached.get("hash") == digest:
-        return result(gate, cached["ok"], cached["summary"] + " (cached: inputs unchanged)", cached.get("log", ""))
+        hit = result(gate, cached["ok"], cached["summary"] + " (cached: inputs unchanged)", cached.get("log", ""))
+        hit["cached"] = True
+        return hit
     kind, argv = judge_command(run)
     env = dict(os.environ)
     for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
         env.pop(var, None)
     try:
         p = subprocess.run(argv, cwd=str(run.project), input=prompt, capture_output=True, text=True, timeout=gate.get("timeout", 900), env=env)
-        out = (p.stdout or "") + (p.stderr or "")
+        reply, cost = judge_reply(kind, p.stdout or "")
+        out = reply + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return judge_error(gate, f"the {kind} judge timed out" + cut_suffix)
     except FileNotFoundError:
@@ -262,12 +267,48 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
             return result(gate, False, f"{kind} judge: FAIL (asked again a decision the person already made: {question})"
                           + cut_suffix, out)
         decided = result(gate, False, f"{kind} judge needs a decision: {question}" + cut_suffix, out)
-        decided["decision"] = question
+        decided.update({"decision": question, "cost": cost})
         return decided
     ok = verdict == "PASS"
     summary = f"{kind} judge: {'PASS' if ok else 'FAIL'}" + cut_suffix
     run.state["judgeCache"][key] = {"hash": digest, "ok": ok, "summary": summary, "log": out[-LOG_TAIL:]}
-    return result(gate, ok, summary, out)
+    judged = result(gate, ok, summary, out)
+    judged.update({"cost": cost, "notMet": not_met(out) if not ok else []})
+    return judged
+
+
+def judge_reply(kind: str, stdout: str) -> Tuple[str, Optional[float]]:
+    """Claude's JSON output wraps the reply with what the call cost. Anything else is the reply."""
+    if kind == "claude":
+        try:
+            data = json.loads(stdout)
+        except ValueError:
+            return stdout, None
+        if isinstance(data, dict) and "result" in data:
+            cost = data.get("total_cost_usd")
+            return str(data.get("result") or ""), float(cost) if isinstance(cost, (int, float)) else None
+    return stdout, None
+
+
+def not_met(out: str) -> List[str]:
+    """The rubric criteria a judge marked NOT MET, as short labels: the reasons health groups by.
+    A label is the text before "NOT MET" on a line where it comes early (a criterion heading),
+    cut at its first colon unless it reads "criterion N", without numbering or markdown."""
+    labels: List[str] = []
+    for line in out.splitlines():
+        if not re.match(r"(?i)\s*(\*\*|[-*#>]|\d+\.|criterion\b)", line):
+            continue  # prose that mentions NOT MET, not a criterion heading
+        plain = re.sub(r"[*_`#>]", "", line).strip(" -\t")
+        at = plain.upper().find("NOT MET")
+        if at <= 0 or at > 80:
+            continue
+        label = plain[:at].strip(" .:-")
+        if not re.match(r"(?i)criterion\s+\d+\b", label) and ":" in label:
+            label = label.split(":", 1)[0]
+        label = re.sub(r"^\d+\.?\s*", "", label).strip(" .:-").lower()[:60]
+        if len(label) >= 2 and label not in labels:
+            labels.append(label)
+    return labels[:10]
 
 
 def activity_path(run: Run) -> Path:

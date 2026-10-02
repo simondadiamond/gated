@@ -226,6 +226,16 @@ checkpoint's `splits.md`, and a URL that doesn't resolve fails the
 checkpoint, so scope can't be dropped by claiming a story that doesn't exist.
 The report lists verified splits under "Split into new stories".
 
+Every stop records each gate's result in `state.json` (`history`): pass or
+fail, a short reason, the criteria a judge marked NOT MET, what a Claude judge
+call cost, and a fingerprint of the work it judged. Advisory `gated check`
+results aren't recorded; their log lines are marked `(check)`. `gated health`
+reads the history across runs and flags gates worth changing: one that blocked
+a run, failed 3 or more times in one run, changed its verdict on unchanged
+work, failed for the same reason in 2 or more runs, or asked the person for a
+decision twice. A gate that failed once or twice and then passed is the
+workflow doing its job, and isn't flagged.
+
 Findings aren't gates. The Stop hook records each `- ` line in a checkpoint's
 `noticed.md` once, the report lists them under "Found, not fixed", and
 `gated findings --since 30d` gathers them across runs.

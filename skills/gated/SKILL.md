@@ -1,7 +1,7 @@
 ---
 name: gated
 description: Run a workflow as a series of checkpoints, each blocked by gates that code checks instead of the agent. Use when the user types /gated, asks to run a named workflow (implement-story, weekly-report, onboarding or any of their own), wants a long job done "properly" with enforced tests or reviews, wants to create a new repeatable workflow, or asks for the status of a gated run. Also the entry point for scheduled tasks that run a workflow by name.
-argument-hint: "[workflow] [key=value ...] | new <name> | customize <workflow> | status | findings | resume [run]"
+argument-hint: "[workflow] [key=value ...] | new <name> | customize <workflow> | status | findings | health | resume [run]"
 allowed-tools: Bash(python3 *bin/gated*)
 ---
 
@@ -47,6 +47,7 @@ person, and ask them to restart the session.
 | empty | Show the picker. See "Picking a workflow". |
 | `status` | Run `gated status` and summarize it in a few lines. |
 | `findings [--since 30d]` | Run `gated findings` and group what keeps coming up. Suggest a workflow change or a `gated learn` line for anything repeated. |
+| `health [--since 30d]` | Run `gated health` and walk its candidates with the person, as in "Improving the workflow". |
 | `resume [run]` | Run `gated resume [--run <id>]`, then continue the loop below from wherever the run is. |
 | `new <name>` | Write a new workflow with the person. See "Writing a workflow". |
 | `customize <workflow>` | Make a workflow the team's own. See "Customizing a workflow". |

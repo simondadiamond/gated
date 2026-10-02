@@ -160,6 +160,11 @@ finished examples, one that should pass and one that should fail, before it
 guards a live run. A gate that has only ever seen its happy path will either
 pass everything or block a correct run.
 
+**Then let the runs tell you.** `gated health` lists, per gate and across runs,
+the failures, blocks, judge calls and their cost, and flags the gates whose
+cost repeats: a loop, a block, a verdict that flipped on unchanged work, the
+same reason in several runs. Those are the gates to fix; the rest are working.
+
 ## Size
 
 Each checkpoint should be reviewable in a few minutes. Order them from the
