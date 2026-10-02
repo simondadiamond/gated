@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import hooks, install, runner
+from . import health, hooks, install, runner
 from .core import (
     GatedError,
     available_workflows,
@@ -59,6 +59,29 @@ def cmd_findings(a: argparse.Namespace) -> str:
         out += ([""] if out else []) + [f"{wf}:"]
         out += [f"  {at[:10]}  {rid}/{cp}  {text}" for w, at, rid, cp, text in sorted(rows, key=lambda x: x[1]) if w == wf]
     return "\n".join(out)
+
+
+def cmd_health(a: argparse.Namespace) -> str:
+    import json
+
+    project = find_project()
+    cutoff = since_cutoff(a.since)
+    focus = resolve_run(project, a.run, finished=True) if a.run else None
+    wanted = a.workflow or (focus.state["workflow"] if focus else None)
+    runs = [r for r in list_runs(project) if r.state.get("updatedAt", "") >= cutoff
+            and (not wanted or r.state["workflow"] == wanted)]
+    if focus and focus.id not in {r.id for r in runs}:
+        runs.append(focus)
+    if not runs:
+        return "No runs" + (f" of {wanted}" if wanted else "") + (f" since {a.since}" if a.since else "") + "."
+    by_workflow: dict = {}
+    for r in runs:
+        by_workflow.setdefault(r.state["workflow"], []).append(r)
+    results = {wf: health.analyze(rs, focus) for wf, rs in sorted(by_workflow.items())}
+    if a.json:
+        return json.dumps({wf: {"runs": res["runs"], "candidates": res["candidates"]} for wf, res in results.items()},
+                          indent=2)
+    return "\n\n".join(health.render(wf, res, focus) for wf, res in results.items())
 
 
 def cmd_status(a: argparse.Namespace) -> str:
@@ -207,6 +230,10 @@ def parser() -> argparse.ArgumentParser:
     sp = add("findings", cmd_findings, "list what steps found but didn't fix, across runs", run_arg=False)
     sp.add_argument("--since", help="12h, 30d, 2w...")
     sp.add_argument("--workflow")
+    sp = add("health", cmd_health, "per-gate failures, blocks, judge cost and flips across runs; flags gates worth changing")
+    sp.add_argument("--since", help="12h, 30d, 2w...")
+    sp.add_argument("--workflow")
+    sp.add_argument("--json", action="store_true", help="candidates as JSON")
     add("resume", cmd_resume, "hand a run to this session")
     add("report", cmd_report, "write and print the run report")
     sp = add("learn", cmd_learn, "append feedback to a workflow's learnings.md")

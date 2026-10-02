@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import os
 import secrets
 import subprocess
@@ -391,13 +392,48 @@ def budget_for(run: Run, gate: Dict[str, Any]) -> int:
     return gate.get("attempts") or run.workflow().get("attempts") or DEFAULT_ATTEMPTS
 
 
-def write_log(run: Run, cp: Dict[str, Any], r: Dict[str, Any]) -> None:
+def write_log(run: Run, cp: Dict[str, Any], r: Dict[str, Any], advisory: bool = False) -> None:
     d = run.dir / cp["id"] / "gates"
     d.mkdir(parents=True, exist_ok=True)
     # Appended, not overwritten: a gate's history (each judge verdict, each rerun) is the evidence
-    # for why a checkpoint took the attempts it took.
+    # for why a checkpoint took the attempts it took. "(check)" marks an advisory `gated check`.
+    cost = f"  ${r['cost']:.2f}" if isinstance(r.get("cost"), (int, float)) else ""
     with (d / f"{r['id']}.log").open("a") as f:
-        f.write(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}  {r['summary']}\n\n{r['log']}\n\n")
+        f.write(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}{' (check)' if advisory else ''}  {r['summary']}{cost}\n\n{r['log']}\n\n")
+
+
+def work_digest(run: Run) -> Optional[str]:
+    """A fingerprint of the work under review: HEAD plus uncommitted changes to tracked files.
+    Two judge verdicts on the same fingerprint judged the same work."""
+    if not (run.project / ".git").exists():
+        return None
+    git = ["git", "-C", str(run.project)]
+    head = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True).stdout
+    diff = subprocess.run(git + ["diff", "HEAD"], capture_output=True).stdout
+    return hashlib.sha256(head + diff).hexdigest()[:16]
+
+
+def record_history(run: Run, cp: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
+    """Keep every gate result a stop counted, in order. `gated health` reads this across runs to
+    find gates that cost more than they catch. Advisory checks aren't recorded."""
+    tree = work_digest(run) if any(r["type"] == "judge" for r in results) else None
+    history = run.state.setdefault("history", [])
+    planned = "instructions" in cp
+    for r in results:
+        entry = {"at": r["at"], "cp": cp["id"], "gate": r["id"], "type": r["type"], "ok": r["ok"],
+                 "summary": r["summary"][:200]}
+        if planned:
+            entry["planned"] = True
+        for k in ("pending", "cached", "decision", "error"):
+            if r.get(k):
+                entry[k] = r[k]
+        if isinstance(r.get("cost"), (int, float)):
+            entry["cost"] = round(float(r["cost"]), 4)
+        if r.get("notMet"):
+            entry["notMet"] = r["notMet"]
+        if r["type"] == "judge" and tree:
+            entry["tree"] = tree
+        history.append(entry)
 
 
 def commit_checkpoint(run: Run, cp: Dict[str, Any]) -> str:
@@ -540,7 +576,8 @@ def take_question(run: Run) -> str:
 
 def answer(run: Run, text: str) -> str:
     q = run.state.pop("question")
-    run.state.setdefault("answers", []).append({"question": q["text"], "answer": text.strip()[:2000], "at": now()})
+    run.state.setdefault("answers", []).append({"question": q["text"], "answer": text.strip()[:2000], "at": now(),
+                                                "from": q.get("from", "agent")})
     run.state["status"] = q["resume"]
     run.save()
     return "gated: recorded your answer. The run continues; its gates still have to pass."
@@ -549,6 +586,7 @@ def answer(run: Run, text: str) -> str:
 def block(run: Run, reasons: List[str]) -> str:
     run.state["status"] = "blocked"
     run.state["blockedOn"] = reasons
+    run.state.setdefault("blocks", []).append({"at": now(), "on": reasons})
     run.save()
     write_report(run)
     return (f"Run {run.id} is blocked: {', '.join(reasons)}. No gate was skipped. "
@@ -610,6 +648,7 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         else:
             review = G.check_judge(run, plan_cp, gate)
             write_log(run, plan_cp, review)
+        record_history(run, plan_cp, code_results + ([] if code_failing else [review]))
         if review.get("decision"):
             # Not a rejection: the plan stays submitted, and the judge sees the answer next stop.
             return True, ask_decision(run, "plan/plan-review", review["decision"], resume="awaiting-approval")
@@ -715,7 +754,9 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
             if key.startswith(prefix) and key not in pending_keys:
                 del pending_since[key]
     for r in results:
-        write_log(run, cp, r)
+        write_log(run, cp, r, advisory=not move)
+    if move:
+        record_history(run, cp, results)
     failing = [r for r in results if not r["ok"] and r["type"] != "human" and not r.get("pending")]
     human = [r for r in results if not r["ok"] and r["type"] == "human"]
     if not move:
