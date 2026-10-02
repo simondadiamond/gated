@@ -233,6 +233,17 @@ class QuestionTest(GatedCase):
         self.assertEqual(code, 2, "an answer, even 'approve', passes no gate")
         self.assertIn("isn't done", err)
 
+    def test_asking_outside_a_running_step_is_refused(self):
+        # Seen live: a question asked while the plan awaited its judge sat unread, then paused the
+        # run five hours later, mid-checkpoint, on a question the approved plan had settled.
+        run = self.failing_run()
+        run.state["status"] = "awaiting-approval"
+        run.save()
+        code, _, err = self.gated("ask", "Amend the criteria?")
+        self.assertNotEqual(code, 0)
+        self.assertIn("questions", err)
+        self.assertFalse((run.dir / "question.md").exists())
+
     def test_cancel_still_works_while_a_question_is_open(self):
         self.failing_run()
         self.gated("ask", "ok?")
