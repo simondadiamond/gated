@@ -260,6 +260,13 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
             errors.append(f"'{key}' must be a non-empty string")
     if "freshContext" in data and not isinstance(data["freshContext"], bool):
         errors.append("'freshContext' must be true or false")
+    shares = data.get("shares", [])
+    if not (isinstance(shares, list) and all(isinstance(s, str) and s.strip() for s in shares)):
+        errors.append("'shares' must be a list of folders, relative to the workflow folder")
+    elif wdir is not None:
+        for s in shares:
+            if not (wdir / s).is_dir():
+                errors.append(f"shared folder {s} does not exist")
     if "judge" in data and data["judge"] not in ("claude", "codex"):
         errors.append("'judge' must be \"claude\" or \"codex\"")
     plan = data.get("plan")
@@ -270,6 +277,18 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
             if wdir is not None and not (wdir / plan["step"]).is_file():
                 errors.append(f"plan step {plan['step']} does not exist")
             lint_skills(plan.get("skills"), "plan", errors)
+            plan_lock = plan.get("lock", [])
+            if not (isinstance(plan_lock, list) and all(isinstance(p, str) and p.strip() for p in plan_lock)):
+                errors.append("plan 'lock' must be a list of file paths")
+            plan_gates = plan.get("gates", [])
+            if not isinstance(plan_gates, list):
+                errors.append("plan 'gates' must be a list of command or file gates")
+            else:
+                for g in plan_gates:
+                    if isinstance(g, dict) and g.get("type") not in ("command", "file"):
+                        errors.append(f"plan gate '{g.get('id')}': only command and file gates run before the plan judge")
+                    else:
+                        lint_gate(g, "plan", wdir, errors)
             approval = plan.get("approval", "human")
             if approval not in ("human", "judge"):
                 errors.append("plan approval must be \"human\" or \"judge\"")

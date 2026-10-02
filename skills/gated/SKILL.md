@@ -100,7 +100,8 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
      to-do rule and the learnings. Add nothing from this conversation beyond
      what the step needs. A fresh context is the point.
    - When the subagent returns, run `gated check`. It only reports; it never
-     moves the run.
+     moves the run. It skips judge gates: a judge runs once, when you end your
+     turn, and that verdict counts.
    - If a gate fails, start a new foreground subagent with the same brief,
      the check's output, and a note that the earlier work is in place and
      only the failures need fixing. Then run `gated check` again. Don't
