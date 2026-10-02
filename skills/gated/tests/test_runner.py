@@ -3,6 +3,7 @@ import subprocess
 
 from helpers import GatedCase
 
+from gated_lib import gates as G
 from gated_lib import runner
 
 
@@ -887,3 +888,81 @@ class LearnTest(GatedCase):
         text = (wdir / "learnings.md").read_text()
         self.assertIn(": keep titles short", text)
         self.assertIn(": no emoji", text)
+
+
+class RelockTest(GatedCase):
+    """A locked test the spec proved wrong can be amended, with a reason and a person's approve."""
+
+    def locked_run(self):
+        self.simple_workflow([{"id": "tests", "type": "red-first", "run": "sh t_a.sh", "lock": ["t_a.sh"]}])
+        self.start(session="owner")
+        (self.project / "t_a.sh").write_text("exit 1\n")
+        code, _, err = self.gated("red", "tests")
+        self.assertEqual(code, 0, err)
+        return self.project / "t_a.sh"
+
+    def edit(self, path):
+        return self.hook("pretool", {"session_id": "owner", "tool_name": "Edit",
+                                     "tool_input": {"file_path": str(path), "old_string": "1", "new_string": "0"}})[0]
+
+    def test_relock_needs_approval_then_locks_again_at_the_next_stop(self):
+        path = self.locked_run()
+        code, out, err = self.gated("relock", "t_a.sh", "--reason", "the issue says the opposite of AC-9")
+        self.assertEqual(code, 0, err)
+        self.assertIn("approve", out)
+        self.assertEqual(self.run_obj().status, "waiting")
+        self.assertEqual(self.edit(path), 2)  # still locked until the person approves
+        _, out, _ = self.hook("prompt", {"session_id": "owner", "prompt": "approve"})
+        self.assertIn("unlocked", out)
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertNotIn(str(path.resolve()), run.state["locks"])
+        self.assertEqual(self.edit(path), 0)
+        path.write_text("exit 0\n")
+        runner.check(self.run_obj(), count_attempts=True)
+        run = self.run_obj()
+        self.assertNotIn("unlocked", run.state)
+        self.assertIn(str(path.resolve()), run.state["locks"])
+        self.assertEqual(G.changed_locks(run), [])
+        self.assertEqual(self.edit(path), 2)
+        report = runner.write_report(run).read_text()
+        self.assertIn("## Relocked tests", report)
+        self.assertIn("the issue says the opposite of AC-9", report)
+
+    def test_relock_rejected_keeps_the_lock(self):
+        path = self.locked_run()
+        self.gated("relock", "t_a.sh", "--reason", "convenient")
+        self.hook("prompt", {"session_id": "owner", "prompt": "reject"})
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertIn(str(path.resolve()), run.state["locks"])
+        self.assertNotIn("relock", run.state)
+
+    def test_relock_refuses_workflow_files_and_needs_a_reason(self):
+        self.locked_run()
+        code, _, err = self.gated("relock", ".claude/workflows/demo/workflow.json", "--reason", "loosen it")
+        self.assertEqual(code, 1)
+        self.assertIn("only tests locked by `gated red`", err)
+        code, _, err = self.gated("relock", "t_a.sh", "--reason", "  ")
+        self.assertEqual(code, 1)
+
+    def test_a_waiting_relock_lets_the_turn_end_without_an_attempt(self):
+        self.locked_run()
+        self.gated("relock", "t_a.sh", "--reason", "spec changed")
+        code, out, _ = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 0)
+        self.assertIn("unlock", out)
+        self.assertEqual(self.run_obj().state["attempts"], {})
+
+
+class CheckpointJudgeErrorTest(GatedCase):
+    def test_a_judge_without_verdict_spends_no_attempt_until_retries_run_out(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo thinking"
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=5)
+        self.start()
+        for _ in range(runner.JUDGE_ERROR_RETRIES - 1):
+            runner.check(self.run_obj(), count_attempts=True)
+            self.assertNotIn("one/review", self.run_obj().state["attempts"])
+        runner.check(self.run_obj(), count_attempts=True)
+        self.assertEqual(self.run_obj().state["attempts"]["one/review"], 1)
