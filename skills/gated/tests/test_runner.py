@@ -1234,3 +1234,51 @@ class DecisionsOffByDefaultTest(GatedCase):
         self.assertIn("doesn't allow", err)
         self.assertNotIn("VERDICT: DECISION", prompt.read_text())
         self.assertNotIn("Decisions the person made", prompt.read_text())
+
+
+class ProtectHardeningTest(GatedCase):
+    def test_files_git_ignores_never_fail_the_locks_gate(self):
+        self.git_init()
+        (self.project / ".gitignore").write_text("__pycache__/\n")
+        (self.project / "harness").mkdir()
+        (self.project / "harness" / "proof.py").write_text("x = 1\n")
+        self.simple_workflow([{"id": "t", "type": "command", "run": "mkdir -p harness/__pycache__ && touch harness/__pycache__/proof.pyc"}],
+                             protect=["harness/"])
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done", "a cache the suite writes isn't a change to protected code")
+
+    def test_a_broad_glob_never_covers_the_run_folder(self):
+        from gated_lib.core import is_protected, protected_files
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}], protect=["**/*.json"])
+        run = self.start(session="owner")
+        self.assertFalse(any(".gated" in str(p) for p in protected_files(self.project, ["**/*.json"])))
+        self.assertFalse(is_protected(self.project, ["**/*.json"], run.dir / "checkpoints.json"))
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")
+
+    def test_hook_and_gate_read_a_glob_the_same_way(self):
+        from gated_lib.core import is_protected
+        p = self.project
+        self.assertTrue(is_protected(p, ["*.config.js"], p / "jest.config.js"))
+        self.assertFalse(is_protected(p, ["*.config.js"], p / "src" / "a" / "new.config.js"), "* stays in one folder")
+        self.assertTrue(is_protected(p, ["**/x.cfg"], p / "x.cfg"), "**/ also matches the top level")
+        self.assertTrue(is_protected(p, ["**/x.cfg"], p / "a" / "b" / "x.cfg"))
+        self.assertTrue(is_protected(p, ["harness"], p / "harness" / "lib" / "a.mjs"))
+
+    def test_a_common_name_in_a_protected_folder_does_not_refuse_unrelated_commands(self):
+        (self.project / "harness").mkdir()
+        (self.project / "harness" / "index.ts").write_text("x\n")
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}], protect=["harness/"])
+        self.start(session="owner")
+        code, _, err = self.hook("pretool", {"session_id": "owner", "agent_id": "sub", "tool_name": "Bash",
+                                             "tool_input": {"command": "sed -i '' s/a/b/ src/index.ts"}})
+        self.assertEqual(code, 0, err)
+
+    def test_protecting_the_whole_project_is_refused(self):
+        from gated_lib.core import lint_workflow
+        base = {"name": "x", "description": "d", "checkpoints": [{"id": "a", "step": "s.md"}]}
+        for bad in (["."], ["**"], ["*"]):
+            self.assertTrue(any("whole project" in e for e in lint_workflow({**base, "protect": bad}, None)), bad)

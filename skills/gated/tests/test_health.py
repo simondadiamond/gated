@@ -44,7 +44,21 @@ class HealthTest(GatedCase):
         self.assertIn("No candidates", out)
         self.assertIn("one/t", out)
 
-    def test_the_same_reason_in_two_runs_is_a_candidate(self):
+    def test_the_same_judge_reason_in_two_runs_is_a_candidate(self):
+        calls = self.tmp / "calls"
+        os.environ["GATED_JUDGE_CMD"] = (f"cat >/dev/null; echo x >> {calls}; "
+                                         f"if [ $(( $(wc -l < {calls}) % 2 )) -eq 1 ]; then echo '**2. Tested: NOT MET.**'; "
+                                         "echo 'VERDICT: FAIL'; else echo 'VERDICT: PASS'; fi")
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict",
+                               "inputs": [{"run": "date +%s%N"}]}])
+        for session in ("s1", "s2"):
+            run = self.start(session=session)
+            self.todos_done(run)
+            self.stops(session, 2)
+        out = self.health()
+        self.assertIn('same reason in 2 runs: "tested"', out)
+
+    def test_a_command_failing_once_in_two_runs_is_not_a_candidate(self):
         self.simple_workflow([{"id": "t", "type": "command", "run": "test -f fixed"}])
         for session in ("s1", "s2"):
             (self.project / "fixed").unlink(missing_ok=True)
@@ -53,8 +67,24 @@ class HealthTest(GatedCase):
             self.stops(session, 1)
             (self.project / "fixed").write_text("x")
             self.stops(session, 1)
-        out = self.health()
-        self.assertIn("same reason in 2 runs", out)
+        self.assertIn("No candidates", self.health())
+
+    def test_a_new_plan_is_not_a_flip(self):
+        self.git_init()
+        calls = self.tmp / "calls"
+        os.environ["GATED_JUDGE_CMD"] = (f"cat >/dev/null; echo x >> {calls}; "
+                                         f"if [ $(wc -l < {calls}) -eq 1 ]; then echo 'VERDICT: FAIL'; else echo 'VERDICT: PASS'; fi")
+        self.workflow("judged", {"plan": {"step": "plan.md", "approval": "judge", "rubric": "rubric.md"}},
+                      {"plan.md": "Plan it.", "rubric.md": "Approve a sound plan."})
+        from gated_lib import runner
+        run = self.start("judged")
+        for title in ("First try", "Second try"):
+            (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+                {"id": "build", "title": title, "instructions": title, "gates": []}]}))
+            self.submit_plan()
+            runner.check(self.run_obj())
+        self.assertEqual(self.run_obj().status, "running")
+        self.assertNotIn("changed its verdict", self.health())
 
     def test_a_judge_that_flips_on_unchanged_work_is_a_candidate(self):
         self.git_init()
@@ -150,16 +180,30 @@ class DismissTest(GatedCase):
         self.assertIn("one/t: failed 3 times", self.gated("health")[1])
 
     def test_dismissing_mid_run_does_not_break_its_locks(self):
-        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
+        self.simple_workflow([{"id": "t", "type": "command", "run": "test -f ok"}])
         run = self.start(session="owner")
         self.todos_done(run)
-        self.gated("health", "--workflow", "demo", "--dismiss", "one/t", "--reason", "fine")
+        self.hook("stop", {"session_id": "owner"})
+        code, _, err = self.gated("health", "--workflow", "demo", "--dismiss", "one/t", "--reason", "fine")
+        self.assertEqual(code, 0, err)
+        (self.project / "ok").write_text("x")
         self.hook("stop", {"session_id": "owner"})
         self.assertEqual(self.run_obj().status, "done")
 
+    def test_dismiss_checks_the_gate_name(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}], attempts=9)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        code, _, err = self.gated("health", "--workflow", "demo", "--dismiss", "one/typo", "--reason", "x")
+        self.assertEqual(code, 1)
+        self.assertIn("Known: one/fresh-context, one/t", err)
+
     def test_dismiss_needs_a_reason(self):
-        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
-        self.start()
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}])
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
         code, _, err = self.gated("health", "--workflow", "demo", "--dismiss", "one/t")
         self.assertEqual(code, 1)
         self.assertIn("say why", err)

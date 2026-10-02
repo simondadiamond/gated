@@ -49,7 +49,7 @@ Run `gated lint <name>` after every change.
 | `skills` | Skills every checkpoint's subagent must load. A checkpoint can list its own `skills` too. |
 | `storySkill` | The skill a step uses to create a new story when it splits work off. Default: `gh issue create`. |
 | `shares` | Folders, relative to this one, whose files the workflow uses (shared steps, rubrics, check scripts). They're locked with the workflow for the whole run. Lets several workflows, like a lite and a full path, share one set of checks. |
-| `protect` | Paths in the project, as folders or globs, that the gates trust but the workflow folder doesn't hold: a test config, a harness a check script reads, a helper in `scripts/`. Locked for the whole run like the workflow folder. The hooks refuse an edit or a new file under them, and the `locks` gate fails if one changes anyway. Keep the list small: every file is hashed at each stop. |
+| `protect` | Paths in the project, as folders or globs, that the gates trust but the workflow folder doesn't hold: a test config, a harness a check script reads, a helper in `scripts/`. Locked for the whole run like the workflow folder. The hooks refuse an Edit or Write under them, including a new file; a change or new file made through the shell fails the `locks` gate at the next stop. In a git repository only tracked files and untracked ones git doesn't ignore count, so caches and build output never trip it. `*` and `?` stay inside one folder, `**` crosses folders, and a plain path covers everything under it. `.git` and `.gated` are never protected. A merge or rebase that changes a protected file fails the run, so bring the base branch in before starting. |
 | `basedOn` | Set by `gated customize`: which workflow this copy came from. |
 | `judge` | `claude` or `codex`: which CLI grades `judge` gates. Defaults to the harness running the workflow. |
 | `before` | Fixed checkpoints that run ahead of the `plan`, like writing acceptance criteria. Needs a `plan`. |
@@ -238,8 +238,9 @@ call cost, and a fingerprint of the work it judged. Advisory `gated check`
 results aren't recorded; their log lines are marked `(check)`. `gated health`
 reads the history across runs and flags gates worth changing: one that blocked
 a run, failed 3 or more times in one run, changed its verdict on unchanged
-work, failed for the same reason in 2 or more runs, or asked the person for a
-decision twice. A gate that failed once or twice and then passed is the
+work (same commit, same uncommitted changes, same file inputs), failed on the
+same NOT MET criterion in 2 or more runs, or asked the person for a decision
+twice. The history keeps a run's last 2000 results. A gate that failed once or twice and then passed is the
 workflow doing its job, and isn't flagged. `gated health --dismiss <gate>
 --reason "..."` records that a person kept a flagged gate as it is, in the
 workflow's `health.json`; the gate is flagged again only for failures after

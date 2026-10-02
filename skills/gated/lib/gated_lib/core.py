@@ -277,8 +277,10 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
     else:
         for p in protect:
             parts = Path(p).parts
-            if Path(p).is_absolute() or ".." in parts or (parts and parts[0] in (".git", ".gated")):
+            if Path(p).is_absolute() or ".." in parts or (parts and parts[0] in NEVER_PROTECTED):
                 errors.append(f"protect path {p} must be inside the project, and not under .git or .gated")
+            elif p.strip().strip("/") in (".", "*", "**", "**/*"):
+                errors.append(f"protect path {p} covers the whole project; list the paths the gates trust")
     if "judge" in data and data["judge"] not in ("claude", "codex"):
         errors.append("'judge' must be \"claude\" or \"codex\"")
     plan = data.get("plan")
@@ -549,34 +551,71 @@ def resolve_run(project: Path, run_id: Optional[str] = None, finished: bool = Fa
     raise GatedError("several runs are active; pass --run <id>: " + ", ".join(r.id for r in active))
 
 
-def protected_files(project: Path, patterns: List[str]) -> List[Path]:
-    """Existing files under a workflow's `protect` paths: a folder means everything in it, anything
-    else is a glob relative to the project."""
-    found = set()
-    for pattern in patterns:
-        base = project / pattern.rstrip("/")
-        if base.is_dir():
-            found |= {p for p in base.rglob("*") if p.is_file()}
-        elif base.is_file():
-            found.add(base)
+NEVER_PROTECTED = (".git", ".gated")
+
+
+def glob_regex(pattern: str) -> "re.Pattern[str]":
+    """One meaning for a protect glob, in the hook and in the gate: `*` and `?` stay inside one
+    folder, `**` crosses folders (`**/x` also matches a top-level `x`), and a plain path also
+    covers everything under it."""
+    p = pattern.strip().rstrip("/")
+    out, i = "", 0
+    while i < len(p):
+        if p.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif p.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif p[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif p[i] == "?":
+            out, i = out + "[^/]", i + 1
         else:
-            found |= {p for p in project.glob(pattern) if p.is_file()}
-    return sorted(p.resolve() for p in found if ".git" not in p.relative_to(project).parts)
+            out, i = out + re.escape(p[i]), i + 1
+    return re.compile(r"^" + out + r"(?:/.*)?$")
+
+
+def git_lines(project: Path, args: List[str], timeout: int = 30) -> Optional[List[str]]:
+    """`git -C <project> <args>` as lines, or None when git is missing, slow or fails."""
+    import subprocess
+
+    try:
+        p = subprocess.run(["git", "-C", str(project), *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return [line for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else None
+
+
+def in_git_repo(project: Path) -> bool:
+    return git_lines(project, ["rev-parse", "--is-inside-work-tree"]) == ["true"]
 
 
 def is_protected(project: Path, patterns: List[str], path: Path) -> bool:
-    """Does a path, existing or not yet, fall under a `protect` entry?"""
-    import fnmatch
-
+    """Does a path, existing or not yet, fall under a `protect` entry? Never the run's own files."""
     try:
         rel = Path(path).resolve().relative_to(Path(project).resolve()).as_posix()
     except ValueError:
         return False
-    for pattern in patterns:
-        p = pattern.rstrip("/")
-        if rel == p or rel.startswith(p + "/") or fnmatch.fnmatch(rel, p):
-            return True
-    return False
+    if rel.split("/")[0] in NEVER_PROTECTED:
+        return False
+    return any(glob_regex(p).match(rel) for p in patterns)
+
+
+def protected_files(project: Path, patterns: List[str]) -> List[Path]:
+    """Files under a workflow's `protect` entries. In a git repository, tracked files plus untracked
+    ones git doesn't ignore, so build output and caches never count; elsewhere, a walk that skips
+    .git and .gated."""
+    if not patterns:
+        return []
+    root = Path(project).resolve()
+    listed = git_lines(root, ["ls-files", "-co", "--exclude-standard"]) if in_git_repo(root) else None
+    if listed is None:
+        listed = []
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in NEVER_PROTECTED]
+            base = Path(folder).relative_to(root)
+            listed += [(base / f).as_posix() for f in files]
+    found = [root / rel for rel in listed if is_protected(root, patterns, root / rel)]
+    return sorted(p for p in found if p.is_file())
 
 
 def ignore_runs(project: Path) -> None:
