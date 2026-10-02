@@ -127,6 +127,53 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
    - If they want changes, write them as checkpoints in a JSON file (same shape
      as a plan, with gates), run `gated amend <file>`, and get their approval
      the same way. They can type `reject` to drop the new checkpoints.
+6. **Improve the workflow.** Last, follow "Improving the workflow" below for
+   this run. It usually takes one command and no question.
+
+### Improving the workflow
+
+A gate that failed once and then passed did its job. A gate that loops,
+blocks, flips its verdict or fails the same way run after run costs time and
+money every run, and a small change to the workflow usually stops it. After
+every finished run (done, or cancelled after real work):
+
+1. Run `gated health --run <id>`. If it lists no candidates, say so in one line
+   and stop.
+2. For each candidate, read that gate's log in the run folder
+   (`<checkpoint>/gates/<gate>.log`) and decide, in three short lines:
+   - **What happened**: the gate, how many stops it failed, what it cost.
+   - **Whose fault**:
+     - *the work*: the gate was right, the step kept getting it wrong;
+     - *the gate*: too strict for what it guards, impossible for its step to
+       pass with what that step may change, fed noisy inputs, or reopening a
+       question settled earlier;
+     - *outside*: the environment, a missing tool or test account, another run.
+   - **The smallest change**:
+     - for the work, a sentence in the step's instructions, or a
+       `gated learn` line, so the next agent gets it right the first time;
+     - for the gate, the narrowest edit to the gate, its rubric or its step;
+     - for something outside, a `gated learn` line or a new story.
+3. Two rules decide what's worth proposing:
+   - Never loosen a gate because the work was wrong. Fix the instructions.
+   - If a change would let through work the gate exists to stop, it isn't
+     worth it. Say so and recommend keeping the gate.
+4. Ask the person about one candidate at a time with your question tool
+   (AskUserQuestion in Claude Code), header the gate's id:
+   "<what happened>. Likely again, because <the signal health gave>.
+   Change: <the smallest change>?" Options: "Yes, change it", "No, keep it as
+   it is" and "Not now". Put your recommendation first and mark it
+   Recommended: "Yes" when the change is worth it, "No" when rule 3 says it
+   isn't.
+
+   Without a question tool, print the same as a numbered list.
+5. Apply each yes. The run is over, so nothing is locked. Edit the workflow
+   files, run `gated lint <workflow>`, and say which files changed. A project
+   workflow belongs on the main branch: commit the change there, never on the
+   story's branch, where it would show up in the story's pull request.
+6. For each "No, keep it as it is", run
+   `gated health --run <id> --dismiss <gate> --reason "<their reason>"`, so
+   the next run doesn't ask again unless the gate fails again. "Not now"
+   records nothing.
 
 ### Rules that keep it honest
 
@@ -171,7 +218,10 @@ Codex automation, don't ask questions. Run the loop to the end. A plan with
 human approval stops as `awaiting-approval`; a plan with judge approval can
 continue unattended. A human gate stops as `waiting`, which is correct. Run
 `gated report` last, and end your reply with the report's path and the run's
-status.
+status. When the run is done, do steps 1 to 3 of "Improving the workflow" and
+write the result to `<run folder>/retro.md`, one candidate per section with
+its three lines and the change you'd propose. Change nothing: a person reads
+it and decides. Name the file in your reply.
 
 ## Customizing a workflow
 

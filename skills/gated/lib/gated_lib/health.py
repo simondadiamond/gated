@@ -32,8 +32,10 @@ def reason_of(entry: Dict[str, Any]) -> List[str]:
     return [text[:80]] if text else []
 
 
-def run_stats(run: Run) -> Dict[str, Dict[str, Any]]:
-    """Per gate, what happened in one run."""
+def run_stats(run: Run, since: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, Any]]:
+    """Per gate, what happened in one run. `since` maps a dismissed gate to when it was dismissed:
+    only what happened after that counts for it."""
+    since = since or {}
     planned_ids = {c["id"] for c in run.state.get("checkpoints", []) if "instructions" in c}
     stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
         "fails": 0, "passes": 0, "judgeCalls": 0, "cost": 0.0, "flips": 0, "decisions": [], "reasons": Counter(),
@@ -41,6 +43,8 @@ def run_stats(run: Run) -> Dict[str, Dict[str, Any]]:
     last_judge: Dict[str, Dict[str, Any]] = {}
     for e in run.state.get("history", []):
         key = gate_key(e["cp"], e["gate"], bool(e.get("planned")))
+        if e["at"] <= since.get(key, ""):
+            continue
         s = stats[key]
         s["first"] = s["first"] or e["at"]
         s["last"] = e["at"]
@@ -71,13 +75,45 @@ def run_stats(run: Run) -> Dict[str, Dict[str, Any]]:
                 key = gate_key(cp, gate, cp in planned_ids)
             else:
                 continue
+            if b.get("at", "") <= since.get(key, ""):
+                continue
             stats[key]["blocks"] += 1
     return dict(stats)
 
 
-def analyze(runs: List[Run], focus: Optional[Run] = None) -> Dict[str, Any]:
+def load_dismissed(workflow_dir) -> Dict[str, Dict[str, str]]:
+    from pathlib import Path
+
+    from .core import read_json
+
+    path = Path(workflow_dir) / "health.json"
+    if not path.is_file():
+        return {}
+    data = read_json(path)
+    return data.get("dismissed", {}) if isinstance(data, dict) else {}
+
+
+def dismiss(workflow_dir, gate: str, reason: str) -> str:
+    """The person looked at a flagged gate and kept it: don't flag it again for what already
+    happened. Kept in the workflow folder, so it travels with the workflow."""
+    from pathlib import Path
+
+    from .core import GatedError, now, read_json, write_json
+
+    if not reason.strip():
+        raise GatedError("say why the gate stays as it is: --reason \"...\"")
+    path = Path(workflow_dir) / "health.json"
+    data = read_json(path) if path.is_file() else {}
+    data.setdefault("dismissed", {})[gate] = {"at": now(), "reason": reason.strip()[:500]}
+    write_json(path, data)
+    return f"{gate} won't be flagged again for what already happened. Recorded in {path}"
+
+
+def analyze(runs: List[Run], focus: Optional[Run] = None,
+            dismissed: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
     """Aggregate per gate over runs of one workflow and list the candidates for a change."""
-    per_run = {r.id: run_stats(r) for r in runs}
+    since = {gate: d.get("at", "") for gate, d in (dismissed or {}).items()}
+    per_run = {r.id: run_stats(r, since) for r in runs}
     gates: Dict[str, Dict[str, Any]] = {}
     for rid, stats in per_run.items():
         for key, s in stats.items():

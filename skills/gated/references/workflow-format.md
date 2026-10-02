@@ -11,6 +11,7 @@ weekly-report/
   checks/*           scripts that gates call (optional)
   rubrics/*.md       rubrics for judge gates (optional)
   learnings.md       feedback from past runs; `gated learn` appends to it
+  health.json        gates a person reviewed and kept; `gated health --dismiss` writes it
 ```
 
 Run `gated lint <name>` after every change.
@@ -234,7 +235,10 @@ reads the history across runs and flags gates worth changing: one that blocked
 a run, failed 3 or more times in one run, changed its verdict on unchanged
 work, failed for the same reason in 2 or more runs, or asked the person for a
 decision twice. A gate that failed once or twice and then passed is the
-workflow doing its job, and isn't flagged.
+workflow doing its job, and isn't flagged. `gated health --dismiss <gate>
+--reason "..."` records that a person kept a flagged gate as it is, in the
+workflow's `health.json`; the gate is flagged again only for failures after
+that. Like `learnings.md`, `health.json` isn't locked during a run.
 
 Findings aren't gates. The Stop hook records each `- ` line in a checkpoint's
 `noticed.md` once, the report lists them under "Found, not fixed", and

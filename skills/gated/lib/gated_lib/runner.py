@@ -92,11 +92,13 @@ def skills_for(wf: Dict[str, Any], cp: Dict[str, Any]) -> List[str]:
 
 
 def definition_files(wdir: Path, shares: Optional[List[str]] = None) -> List[Path]:
-    """Every file in the workflow folder and the folders it shares, except learnings.md: steps,
-    rubrics and check scripts. Locked for the whole run, so no gate can be loosened mid-run."""
+    """Every file in the workflow folder and the folders it shares, except learnings.md and
+    health.json (feedback, written between runs): steps, rubrics and check scripts. Locked for the
+    whole run, so no gate can be loosened mid-run."""
     files = set()
     for folder in [wdir] + [(wdir / s).resolve() for s in shares or []]:
-        files |= {p for p in folder.rglob("*") if p.is_file() and p.name != "learnings.md" and ".git" not in p.parts}
+        files |= {p for p in folder.rglob("*") if p.is_file() and p.name not in ("learnings.md", "health.json")
+                  and ".git" not in p.parts}
     return sorted(files)
 
 
