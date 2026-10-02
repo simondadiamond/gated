@@ -214,7 +214,11 @@ def guard(run: Run, payload: Dict[str, Any], tool: str, tool_input: Dict[str, An
     # Shell writes: deny a part of the command that both looks like a write and names a protected
     # file. Parts are judged one by one, so reading state while writing todo.md is fine. The rest of
     # the run folder is the step's own workspace. Hashes and the digest catch what this misses.
-    names = {"state.json", "activity.jsonl"} | {p.name for p in protected}
+    # Files locked by `protect` are left out: a protected folder holds common names (index.ts,
+    # package.json) and matching by name would refuse unrelated commands. The locks gate still
+    # catches a change to them at the next stop.
+    by_protect = set(run.state.get("protectLocked", []))
+    names = {"state.json", "activity.jsonl"} | {p.name for p in protected if str(p) not in by_protect}
     for segment in PIPELINE_RE.split(command_text(tool_input)):
         if not segment.strip() or is_gated_call(segment) or not writes(segment):
             continue

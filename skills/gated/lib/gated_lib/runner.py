@@ -18,6 +18,7 @@ from .core import (
     Run,
     every_collisions,
     find_workflow,
+    git_lines,
     ignore_runs,
     protected_files,
     record_claim,
@@ -159,7 +160,9 @@ def start(project: Path, name: str, args: List[str]) -> Run:
         # Code outside the workflow that its gates trust (a test config, a harness a check reads).
         # Locked like the workflow, so the agent being checked can't weaken the checker.
         run.state["protect"] = list(wf["protect"])
-        lock(run, protected_files(project, wf["protect"]))
+        files = protected_files(project, wf["protect"])
+        lock(run, files)
+        run.state["protectLocked"] = [str(p.resolve()) for p in files]
     if starts_running:
         activate(run)
     run.save()
@@ -405,14 +408,28 @@ def write_log(run: Run, cp: Dict[str, Any], r: Dict[str, Any], advisory: bool = 
 
 
 def work_digest(run: Run) -> Optional[str]:
-    """A fingerprint of the work under review: HEAD plus uncommitted changes to tracked files.
-    Two judge verdicts on the same fingerprint judged the same work."""
-    if not (run.project / ".git").exists():
+    """A fingerprint of the work in the repository: HEAD, uncommitted changes to tracked files,
+    and untracked files git doesn't ignore. With the digest of a judge's file inputs (the plan,
+    a criteria file), two verdicts on the same fingerprint judged the same work."""
+    head = git_lines(run.project, ["rev-parse", "--verify", "-q", "HEAD"])
+    if head is None and git_lines(run.project, ["rev-parse", "--is-inside-work-tree"]) != ["true"]:
         return None
-    git = ["git", "-C", str(run.project)]
-    head = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True).stdout
-    diff = subprocess.run(git + ["diff", "HEAD"], capture_output=True).stdout
-    return hashlib.sha256(head + diff).hexdigest()[:16]
+    h = hashlib.sha256("\n".join(head or ["(no commits)"]).encode())
+    try:
+        h.update(subprocess.run(["git", "-C", str(run.project), "diff", "HEAD" if head else "--cached"],
+                                capture_output=True, timeout=60).stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for rel in git_lines(run.project, ["ls-files", "-o", "--exclude-standard"]) or []:
+        h.update(rel.encode())
+        try:
+            h.update((run.project / rel).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:16]
+
+
+HISTORY_CAP = 2000  # per run; the oldest results go first
 
 
 def record_history(run: Run, cp: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
@@ -434,8 +451,9 @@ def record_history(run: Run, cp: Dict[str, Any], results: List[Dict[str, Any]]) 
         if r.get("notMet"):
             entry["notMet"] = r["notMet"]
         if r["type"] == "judge" and tree:
-            entry["tree"] = tree
+            entry["tree"] = hashlib.sha256(f"{tree}:{r.get('files', '')}".encode()).hexdigest()[:16]
         history.append(entry)
+    del history[:-HISTORY_CAP]
 
 
 def commit_checkpoint(run: Run, cp: Dict[str, Any]) -> str:
@@ -534,14 +552,11 @@ def new_protected_files(run: Run) -> List[str]:
 def tracked_run_files(run: Run) -> List[str]:
     """Files of this run that git tracks. `.gated/.gitignore` keeps them out, but `git add -f` gets
     past it, and a run's to-do list or ledger then lands in the pull request (seen live)."""
-    if not (run.project / ".git").exists():
-        return []
     try:
         rel = run.dir.relative_to(run.project)
     except ValueError:
         return []
-    p = subprocess.run(["git", "-C", str(run.project), "ls-files", "--", str(rel)], capture_output=True, text=True)
-    return [line for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else []
+    return git_lines(run.project, ["ls-files", "--", str(rel)]) or []
 
 
 def ask_decision(run: Run, gate_key: str, question: str, resume: str = "running") -> str:

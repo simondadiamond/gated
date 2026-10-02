@@ -69,9 +69,17 @@ def cmd_health(a: argparse.Namespace) -> str:
     focus = resolve_run(project, a.run, finished=True) if a.run else None
     wanted = a.workflow or (focus.state["workflow"] if focus else None)
     if a.dismiss:
+        from .core import SKILL_DIR
+
         if not wanted:
             raise GatedError("name the workflow: --workflow <name> or --run <id>")
         wdir = focus.workflow_dir if focus else find_workflow(wanted, project)
+        if SKILL_DIR in wdir.resolve().parents:
+            raise GatedError(f"{wanted} is a built-in workflow; a dismissal there is lost on update. "
+                             f"Run `gated customize {wanted}` and dismiss in the copy")
+        known = set(health.analyze([r for r in list_runs(project) if r.state["workflow"] == wanted])["gates"])
+        if a.dismiss not in known:
+            raise GatedError(f"no gate '{a.dismiss}' in {wanted}'s history. Known: " + (", ".join(sorted(known)) or "none"))
         return health.dismiss(wdir, a.dismiss, a.reason or "")
     runs = [r for r in list_runs(project) if r.state.get("updatedAt", "") >= cutoff
             and (not wanted or r.state["workflow"] == wanted)]

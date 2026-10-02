@@ -3,7 +3,8 @@
 usage: plan-covers.py <run dir>
 
 Runs on a submitted plan, before anyone approves it: a criterion no checkpoint covers would
-otherwise surface only at review, after the code is written.
+otherwise surface only at review, after the code is written. Reads the plan from the run's
+checkpoints.json, where the planner writes it.
 """
 import json
 import os

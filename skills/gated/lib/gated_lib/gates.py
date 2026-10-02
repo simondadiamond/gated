@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -223,6 +224,7 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
     decisions = decisions_enabled(run, gate)
     parts = [JUDGE_PREAMBLE + (DECISION_PREAMBLE if decisions else ""), "## Rubric\n", rubric, "\n## Inputs\n"]
     cuts = []
+    files_seen = hashlib.sha256()
     for inp in gate.get("inputs", []):
         limit = inp.get("maxChars", gate.get("maxChars", 200000))
         if "run" in inp:
@@ -234,6 +236,7 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
         else:
             p = resolve_path(run, inp["file"], cp)
             raw = p.read_text(errors="replace") if p.is_file() else "(file does not exist)"
+            files_seen.update(raw.encode())
             body, cut = clip(raw, limit)
             label = str(p)
             parts.append(f"### {p}\n```\n{body}\n```\n")
@@ -250,7 +253,7 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
     cached = run.state.setdefault("judgeCache", {}).get(key)
     if cached and cached.get("hash") == digest:
         hit = result(gate, cached["ok"], cached["summary"] + " (cached: inputs unchanged)", cached.get("log", ""))
-        hit["cached"] = True
+        hit.update({"cached": True, "files": files_seen.hexdigest()[:16]})
         return hit
     kind, argv = judge_command(run)
     env = dict(os.environ)
@@ -279,13 +282,13 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
             return result(gate, False, f"{kind} judge: FAIL (asked again a decision the person already made: {question})"
                           + cut_suffix, out)
         decided = result(gate, False, f"{kind} judge needs a decision: {question}" + cut_suffix, out)
-        decided.update({"decision": question, "cost": cost})
+        decided.update({"decision": question, "cost": cost, "files": files_seen.hexdigest()[:16]})
         return decided
     ok = verdict == "PASS"
     summary = f"{kind} judge: {'PASS' if ok else 'FAIL'}" + cut_suffix
     run.state["judgeCache"][key] = {"hash": digest, "ok": ok, "summary": summary, "log": out[-LOG_TAIL:]}
     judged = result(gate, ok, summary, out)
-    judged.update({"cost": cost, "notMet": not_met(out) if not ok else []})
+    judged.update({"cost": cost, "notMet": not_met(out) if not ok else [], "files": files_seen.hexdigest()[:16]})
     return judged
 
 

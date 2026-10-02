@@ -8,7 +8,6 @@ passed is the workflow doing its job, so it is never a candidate.
 
 from __future__ import annotations
 
-import re
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -25,11 +24,10 @@ def gate_key(cp: str, gate: str, planned: bool) -> str:
 
 
 def reason_of(entry: Dict[str, Any]) -> List[str]:
-    """What a failure was about, in a form that repeats across runs."""
-    if entry.get("notMet"):
-        return list(entry["notMet"])
-    text = re.sub(r"\b[0-9a-f]{7,}\b|\d+", "#", entry.get("summary", "")).strip()
-    return [text[:80]] if text else []
+    """What a failure was about, in a form that repeats across runs: the criteria a judge marked
+    NOT MET. A command's summary ("`npm test` exited 1") is the same every time whatever broke,
+    so it says nothing about recurrence and isn't used."""
+    return list(entry.get("notMet") or [])
 
 
 def run_stats(run: Run, since: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, Any]]:
@@ -69,7 +67,9 @@ def run_stats(run: Run, since: Optional[Dict[str, str]] = None) -> Dict[str, Dic
     for b in run.state.get("blocks", []):
         for reason in b.get("on", []):
             if reason == "plan":
-                key = "plan/plan-review"
+                # The plan judge's budget, or a planner that never submitted.
+                judged = any(e["cp"] == "plan" and e["gate"] == "plan-review" for e in run.state.get("history", []))
+                key = "plan/plan-review" if judged else "plan/(not submitted)"
             elif "/" in reason:
                 cp, gate = reason.split("/", 1)
                 key = gate_key(cp, gate, cp in planned_ids)
