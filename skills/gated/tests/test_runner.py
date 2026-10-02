@@ -1049,3 +1049,32 @@ class GateLogHistoryTest(GatedCase):
         runner.check(self.run_obj(), count_attempts=True)
         log = (self.run_obj().dir / "one" / "gates" / "t.log").read_text()
         self.assertEqual(log.count("FAIL"), 2)
+
+
+class RunFilesTest(GatedCase):
+    def test_a_tracked_run_file_fails_the_checkpoint_until_untracked(self):
+        self.git_init()
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}], attempts=5)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        todo = run.dir / "one" / "todo.md"
+        subprocess.run(["git", "add", "-f", str(todo)], cwd=str(self.project), check=True)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, err)
+        self.assertIn("run-files", err)
+        self.assertEqual(self.run_obj().state["attempts"], {"one/run-files": 1})
+        subprocess.run(["git", "rm", "-q", "--cached", str(todo)], cwd=str(self.project), check=True)
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done", err)
+
+    def test_files_tracked_outside_this_run_are_left_alone(self):
+        self.git_init()
+        kept = self.project / ".gated" / "notes.md"
+        kept.parent.mkdir(parents=True)
+        kept.write_text("a team keeps this on purpose")
+        subprocess.run(["git", "add", "-f", str(kept)], cwd=str(self.project), check=True)
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")

@@ -466,6 +466,19 @@ def collect_splits(run: Run, cp: Dict[str, Any]) -> List[Dict[str, Any]]:
     return pending
 
 
+def tracked_run_files(run: Run) -> List[str]:
+    """Files of this run that git tracks. `.gated/.gitignore` keeps them out, but `git add -f` gets
+    past it, and a run's to-do list or ledger then lands in the pull request (seen live)."""
+    if not (run.project / ".git").exists():
+        return []
+    try:
+        rel = run.dir.relative_to(run.project)
+    except ValueError:
+        return []
+    p = subprocess.run(["git", "-C", str(run.project), "ls-files", "--", str(rel)], capture_output=True, text=True)
+    return [line for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else []
+
+
 def question_path(run: Run) -> Path:
     return run.dir / "question.md"
 
@@ -619,6 +632,11 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     if changed:
         results.append({"id": "locks", "type": "locks", "ok": False, "at": now(), "log": "",
                         "summary": "locked files changed since they were locked: " + ", ".join(changed)})
+    tracked = tracked_run_files(run)
+    if tracked:
+        results.append({"id": "run-files", "type": "run-files", "ok": False, "at": now(), "log": "",
+                        "summary": "this run's own files are tracked by git: " + ", ".join(tracked[:5])
+                        + ". Remove them with `git rm --cached` in a new commit; never `git add -f` under .gated/"})
     gate_by_id = {g["id"]: g for g in cp["gates"]}
     checked_at = now()
     pending_since = run.state.setdefault("pendingSince", {}) if move else dict(run.state.get("pendingSince", {}))
