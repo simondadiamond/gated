@@ -267,6 +267,14 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
         for s in shares:
             if not (wdir / s).is_dir():
                 errors.append(f"shared folder {s} does not exist")
+    protect = data.get("protect", [])
+    if not (isinstance(protect, list) and all(isinstance(p, str) and p.strip() for p in protect)):
+        errors.append("'protect' must be a list of paths or globs, relative to the project")
+    else:
+        for p in protect:
+            parts = Path(p).parts
+            if Path(p).is_absolute() or ".." in parts or (parts and parts[0] in (".git", ".gated")):
+                errors.append(f"protect path {p} must be inside the project, and not under .git or .gated")
     if "judge" in data and data["judge"] not in ("claude", "codex"):
         errors.append("'judge' must be \"claude\" or \"codex\"")
     plan = data.get("plan")
@@ -535,6 +543,36 @@ def resolve_run(project: Path, run_id: Optional[str] = None, finished: bool = Fa
     if not active:
         raise GatedError("no active run here. Start one with `gated start <workflow>`.")
     raise GatedError("several runs are active; pass --run <id>: " + ", ".join(r.id for r in active))
+
+
+def protected_files(project: Path, patterns: List[str]) -> List[Path]:
+    """Existing files under a workflow's `protect` paths: a folder means everything in it, anything
+    else is a glob relative to the project."""
+    found = set()
+    for pattern in patterns:
+        base = project / pattern.rstrip("/")
+        if base.is_dir():
+            found |= {p for p in base.rglob("*") if p.is_file()}
+        elif base.is_file():
+            found.add(base)
+        else:
+            found |= {p for p in project.glob(pattern) if p.is_file()}
+    return sorted(p.resolve() for p in found if ".git" not in p.relative_to(project).parts)
+
+
+def is_protected(project: Path, patterns: List[str], path: Path) -> bool:
+    """Does a path, existing or not yet, fall under a `protect` entry?"""
+    import fnmatch
+
+    try:
+        rel = Path(path).resolve().relative_to(Path(project).resolve()).as_posix()
+    except ValueError:
+        return False
+    for pattern in patterns:
+        p = pattern.rstrip("/")
+        if rel == p or rel.startswith(p + "/") or fnmatch.fnmatch(rel, p):
+            return True
+    return False
 
 
 def ignore_runs(project: Path) -> None:

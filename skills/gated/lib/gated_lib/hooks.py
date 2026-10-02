@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import runner
-from .core import FINISHED_STATUSES, SKILL_DIR, Run, locked, now, owned_run, record_owner, session_run_dir, take_claim
+from .core import (FINISHED_STATUSES, SKILL_DIR, Run, is_protected, locked, now, owned_run, record_owner,
+                   session_run_dir, take_claim)
 
 # The whole message must be an explicit approval, so a conversational "yes" or feedback is not approval.
 APPROVE_RE = re.compile(r"^\s*(approve|approved|lgtm|ship it)\s*[.!]*\s*$", re.IGNORECASE)
@@ -193,7 +194,13 @@ def guard(run: Run, payload: Dict[str, Any], tool: str, tool_input: Dict[str, An
         for s in strings(tool_input):
             for m in PATCH_FILE_RE.finditer(s):
                 targets.append(m.group(1) or m.group(2))
+    patterns = run.state.get("protect") or []
     for t in targets:
+        target = Path(t.strip()).expanduser()
+        target = (target if target.is_absolute() else cwd / target).resolve()
+        if patterns and is_protected(run.project, patterns, target):
+            return Decision(2, f"gated: {target} is under a path the workflow protects, because its gates trust that "
+                               f"code. Run {run.id} can't change it; it changes in its own change, outside a run.")
         p = hit(t)
         if p:
             return Decision(2, f"gated: {p} is locked by run {run.id}. The gates are checked against it, so it can't change. "
