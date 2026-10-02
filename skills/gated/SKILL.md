@@ -77,7 +77,9 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
    The output has a `gated-claim:` line; leave it alone. The hook uses it to
    make this session the owner of the run.
 2. **Plan, if the run says `planning`.**
-   - Run `gated step` and give its whole output to a planning subagent.
+   - Run `gated step` and give its whole output to a planning subagent. It
+     has to write the plan file, so use one with write tools (in Claude Code,
+     not the read-only Plan type).
    - When the subagent returns, run `gated submit-plan`. If it lists problems,
      give them to a new foreground planning subagent along with the plan's
      path, and submit again.
@@ -130,6 +132,13 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
   tests locked by `gated red`. The hooks deny it, and a changed locked file
   fails every gate anyway. If a gate itself is wrong, say so to the person.
   Fixing gates belongs to them, outside the run.
+- A locked test can turn out to be wrong: the issue says the opposite, or the
+  criteria were amended for a reason a person accepted. Don't work around the
+  lock. Run `gated relock <file> --reason "<why>"`, put the reason to the
+  person and end your turn; the run waits without spending an attempt. After
+  they type `approve`, amend the test in a commit of its own (in a repo that
+  marks it, `[checkpoint-amend]`), and the next stop locks it again. The
+  report lists every relock with its reason. Workflow files can't be relocked.
 - When you try to end your turn, the Stop hook reruns the current gates. If
   they fail, you're told why and you keep going. That counts as one attempt.
   When a gate uses up its attempts (5 unless the workflow says otherwise), the
