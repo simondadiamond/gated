@@ -494,6 +494,19 @@ def tracked_run_files(run: Run) -> List[str]:
     return [line for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else []
 
 
+def ask_decision(run: Run, gate_key: str, question: str, resume: str = "running") -> str:
+    """A judge said the verdict hinges on a choice only a person can make. Ask it once, spend no
+    attempt, and pass the answer to every later judge call in this run."""
+    text = f"{gate_key}: {question}"
+    n = 1 + len(run.state.get("answers", []))
+    (run.dir / f"question-{n}.md").write_text(text + "\n")
+    run.state["question"] = {"text": text[:2000], "at": now(), "resume": resume, "from": "judge"}
+    run.state["status"] = "waiting"
+    run.save()
+    return (f"A judge needs a decision only the person can make: {question}\nPut it to them as written and "
+            "end your turn. No attempt was spent; their answer goes to the judge on the next stop.")
+
+
 def question_path(run: Run) -> Path:
     return run.dir / "question.md"
 
@@ -585,6 +598,9 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         else:
             review = G.check_judge(run, plan_cp, gate)
             write_log(run, plan_cp, review)
+        if review.get("decision"):
+            # Not a rejection: the plan stays submitted, and the judge sees the answer next stop.
+            return True, ask_decision(run, "plan/plan-review", review["decision"], resume="awaiting-approval")
         errors = run.state.setdefault("judgeErrors", {})
         if review.get("error") and errors.get("plan", 0) + 1 < JUDGE_ERROR_RETRIES:
             # No verdict is not a rejection: keep the plan, spend no attempt, retry on the next stop.
@@ -742,6 +758,8 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
                 errors.pop(f"{cp['id']}/{r['id']}", None)
         for r in failing:
             key = f"{cp['id']}/{r['id']}"
+            if r.get("decision"):
+                continue  # a question for the person, not a verdict on the work
             if r.get("error") and errors.get(key, 0) + 1 < JUDGE_ERROR_RETRIES:
                 errors[key] = errors.get(key, 0) + 1  # no verdict says nothing about the work
                 continue
@@ -752,6 +770,11 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     lines = [f"- {r['id']} ({r['type']}): {r['summary']}" for r in failing]
     if exhausted:
         return True, block(run, [f"{cp['id']}/{r['id']}" for r in exhausted])
+    decision = next((r for r in failing if r.get("decision")), None)
+    if decision and move:
+        others = [r for r in failing if r is not decision and not r.get("decision")]
+        note = ("\nThese gates also failed and spent an attempt: " + ", ".join(r["id"] for r in others)) if others else ""
+        return True, ask_decision(run, f"{cp['id']}/{decision['id']}", decision["decision"]) + note
     run.save()
     tries = ""
     if count_attempts:

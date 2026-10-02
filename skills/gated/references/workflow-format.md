@@ -164,6 +164,12 @@ an outside system can set `pendingExit` to an exit code from 1 to 255, except
 pending longer than `pendingMax` seconds, 21600 by default, it becomes a normal
 failure. These fields are allowed only on command gates.
 
+A judge ends with `VERDICT: PASS`, `VERDICT: FAIL` or, when the verdict hinges
+on a choice only a person can make, `VERDICT: DECISION <question>`. A decision
+pauses the run as `waiting` with that question and spends no attempt (a plan
+stays submitted). Every later judge call in the run receives the person's
+answers. Asking again a question already answered counts as a FAIL.
+
 A judge input uses its own `maxChars`, then the judge gate's `maxChars`, then
 200000 by default. The value must be an integer of at least 1000. Oversized
 inputs keep their beginning and end, mark how much was cut from the middle,
@@ -197,7 +203,7 @@ to-do list or ledger fails the checkpoint until a new commit removes it with
 | `planning` | a planner is writing the checkpoints | blocks until a plan is submitted |
 | `awaiting-approval` | a plan or amendment waits for the person | lets the turn end |
 | `running` | a checkpoint is in progress | blocks while gates fail |
-| `waiting` | only a `human` gate is left, or the agent asked the person something with `gated ask` | lets the turn end without spending an attempt |
+| `waiting` | only a `human` gate is left, the agent asked the person something with `gated ask`, or a judge needs a decision | lets the turn end without spending an attempt |
 | `blocked` | a gate used all its attempts, or `state.json` changed outside gated | lets the turn end; the person types `approve` to grant fresh attempts after `gated resume` |
 | `done` | every checkpoint passed | lets the turn end |
 | `cancelled` | the person typed `cancel run` | lets the turn end |

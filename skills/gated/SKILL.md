@@ -157,6 +157,10 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
   run waits without spending an attempt, and their next message answers it.
   Don't end your turn to wait any other way: every other stop reruns the gates
   and counts.
+- A judge can stop the run with a decision only the person can make (the stop
+  hook says "A judge needs a decision"). Put the question to them exactly as
+  written and end your turn. Their reply is recorded as the answer, and the
+  judge sees it on the next stop. Don't answer it yourself.
 - Keep the person's interruptions to one decision each.
 
 ### Scheduled and headless runs
