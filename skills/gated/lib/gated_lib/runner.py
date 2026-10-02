@@ -366,7 +366,10 @@ def budget_for(run: Run, gate: Dict[str, Any]) -> int:
 def write_log(run: Run, cp: Dict[str, Any], r: Dict[str, Any]) -> None:
     d = run.dir / cp["id"] / "gates"
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{r['id']}.log").write_text(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}  {r['summary']}\n\n{r['log']}")
+    # Appended, not overwritten: a gate's history (each judge verdict, each rerun) is the evidence
+    # for why a checkpoint took the attempts it took.
+    with (d / f"{r['id']}.log").open("a") as f:
+        f.write(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}  {r['summary']}\n\n{r['log']}\n\n")
 
 
 def commit_checkpoint(run: Run, cp: Dict[str, Any]) -> str:
