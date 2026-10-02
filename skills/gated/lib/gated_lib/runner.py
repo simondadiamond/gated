@@ -290,6 +290,18 @@ def approve(run: Run, text: str) -> str:
         amendment = bool(run.state.get("amendment"))
         cp = approve_awaiting(run, text)
         return f"gated: you approved {'the new checkpoints' if amendment else 'the plan'} for {run.id}. Next is '{cp['id']}'; the agent runs `gated step` for its brief."
+    if run.status == "waiting" and run.state.get("relock"):
+        req = run.state.pop("relock")
+        for f in req["files"]:
+            run.state["locks"].pop(f, None)
+        run.state.setdefault("unlocked", {}).update({f: req["reason"] for f in req["files"]})
+        run.state.setdefault("relocks", []).append({**req, "approvedAt": now(), "by": "person"})
+        run.state["approvals"].append({**stamp, "gate": "relock"})
+        run.state["status"] = "running"
+        run.save()
+        names = ", ".join(Path(f).name for f in req["files"])
+        return (f"gated: you unlocked {names}. The agent amends them now; the next stop locks them again "
+                "and the report lists the change with its reason.")
     if run.status == "waiting":
         cp = run.current()
         for g in cp["gates"]:
@@ -321,7 +333,13 @@ def approve(run: Run, text: str) -> str:
 
 
 def reject(run: Run, text: str) -> str:
-    """The person turned down an amendment. Put the run back how it was."""
+    """The person turned down an amendment or a relock. Put the run back how it was."""
+    if run.status == "waiting" and run.state.get("relock"):
+        req = run.state.pop("relock")
+        run.state.setdefault("relocks", []).append({**req, "refusedAt": now(), "by": "person"})
+        run.state["status"] = "running"
+        run.save()
+        return "gated: you refused the relock. The tests stay locked as they are."
     amendment = run.state.pop("amendment", None)
     if run.status != "awaiting-approval" or not amendment:
         return ""
@@ -348,7 +366,10 @@ def budget_for(run: Run, gate: Dict[str, Any]) -> int:
 def write_log(run: Run, cp: Dict[str, Any], r: Dict[str, Any]) -> None:
     d = run.dir / cp["id"] / "gates"
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{r['id']}.log").write_text(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}  {r['summary']}\n\n{r['log']}")
+    # Appended, not overwritten: a gate's history (each judge verdict, each rerun) is the evidence
+    # for why a checkpoint took the attempts it took.
+    with (d / f"{r['id']}.log").open("a") as f:
+        f.write(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}  {r['summary']}\n\n{r['log']}\n\n")
 
 
 def commit_checkpoint(run: Run, cp: Dict[str, Any]) -> str:
@@ -538,6 +559,10 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         run.save()
         return False, ("The judge rejected the plan:\n" + review_text
                        + "\nHand it to a NEW planning subagent with `gated step`, then `gated submit-plan` again.")
+    if run.status == "waiting" and run.state.get("relock"):
+        req = run.state["relock"]
+        return True, ("Waiting for the person to approve unlocking "
+                      + ", ".join(Path(f).name for f in req["files"]) + ": " + req["reason"])
     if run.status == "waiting" and run.state.get("question"):
         return True, "Waiting for the person to answer: " + run.state["question"]["text"]
     if run.status == "waiting":
@@ -556,6 +581,8 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     if move:
         collect_findings(run, cp)
         unverified = collect_splits(run, cp)
+    if move and run.state.get("unlocked"):
+        lock(run, [Path(f) for f in run.state.pop("unlocked")])
     results = [G.evaluate(run, cp, g) for g in cp["gates"]]
     if unverified:
         results.append({"id": "splits", "type": "splits", "ok": False, "at": now(), "log": "",
@@ -641,8 +668,15 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     exhausted = []
     if count_attempts:
         gates_by_id = {g["id"]: g for g in cp["gates"]}
+        errors = run.state.setdefault("judgeErrors", {})
+        for r in results:
+            if r["type"] == "judge" and not r.get("error"):
+                errors.pop(f"{cp['id']}/{r['id']}", None)
         for r in failing:
             key = f"{cp['id']}/{r['id']}"
+            if r.get("error") and errors.get(key, 0) + 1 < JUDGE_ERROR_RETRIES:
+                errors[key] = errors.get(key, 0) + 1  # no verdict says nothing about the work
+                continue
             n = run.state["attempts"].get(key, 0) + 1
             run.state["attempts"][key] = n
             if n >= budget_for(run, gates_by_id.get(r["id"], {})):
@@ -654,12 +688,34 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     tries = ""
     if count_attempts:
         tries = "\nAttempts used: " + ", ".join(
-            f"{r['id']} {run.state['attempts'][cp['id'] + '/' + r['id']]}/{budget_for(run, {g['id']: g for g in cp['gates']}.get(r['id'], {}))}"
+            f"{r['id']} {run.state['attempts'].get(cp['id'] + '/' + r['id'], 0)}/{budget_for(run, {g['id']: g for g in cp['gates']}.get(r['id'], {}))}"
+            + (" (no verdict, not counted)" if r.get("error") and cp['id'] + '/' + r['id'] not in run.state['attempts'] else "")
             for r in failing)
     tail = "\n\n".join(f"{r['id']}:\n{r['log'][-1200:]}" for r in failing if r.get("log"))
     return False, (f"Checkpoint '{cp['id']}' isn't done. Failing gates:\n" + "\n".join(lines) + tries
                    + (f"\n\nOutput:\n{tail}" if tail else "")
                    + f"\n\nFull logs: {run.dir / cp['id'] / 'gates'}")
+
+
+def request_relock(run: Run, paths: List[str], reason: str) -> str:
+    """Ask the person to unlock tests the spec proved wrong. Workflow files can never be relocked."""
+    if run.status != "running":
+        raise GatedError(f"{run.id} is {run.status}; a relock needs a running checkpoint")
+    if not reason.strip():
+        raise GatedError("say why the locked tests are wrong: `gated relock <file> --reason \"...\"`")
+    red_files = {f for entry in run.state.get("red", {}).values() for f in entry.get("files", [])}
+    files = []
+    for p in paths:
+        full = str((run.project / p).resolve()) if not Path(p).is_absolute() else str(Path(p).resolve())
+        if full not in red_files:
+            raise GatedError(f"{p} can't be relocked: only tests locked by `gated red` can, never workflow files")
+        files.append(full)
+    run.state["relock"] = {"files": files, "reason": reason.strip()[:1000], "at": now()}
+    run.state["status"] = "waiting"
+    run.save()
+    return ("Relock requested. Put the reason to the person and end your turn: the run waits without spending "
+            "an attempt. If they type `approve`, edit the tests, commit the change on its own, and the next stop "
+            "locks them again. `reject` keeps them as they are.")
 
 
 def red(run: Run, gate_id: str) -> str:
@@ -799,6 +855,11 @@ def write_report(run: Run) -> Path:
         lines += ["## Found, not fixed", ""] + [f"- [{f['checkpoint']}] {f['text']}" for f in s["findings"]] + [""]
     if s.get("answers"):
         lines += ["## Questions asked mid-run", ""] + [f"- Q: {a['question'][:200]}\n  A: {a['answer'][:200]}" for a in s["answers"]] + [""]
+    if s.get("relocks"):
+        lines += ["## Relocked tests", ""] + [
+            f"- {', '.join(Path(f).name for f in r['files'])}: {'approved' if r.get('approvedAt') else 'refused'} "
+            f"by {r.get('by', 'person')}. Reason: {r['reason'][:300]}" for r in s["relocks"]
+        ] + [""]
     if s.get("approvals"):
         lines += ["## Approvals", ""] + [
             f"- {a['gate']} at {a['at']} by {a.get('by', 'person')}: \"{a['text']}\"" for a in s["approvals"]
