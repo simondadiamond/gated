@@ -133,8 +133,9 @@ Seen in real runs:
 **Protect what the gates trust.** `gated` locks the workflow folder. A gate
 that runs code outside it (a test config, a harness a proof script reads, a
 helper in `scripts/`) can be weakened by the same agent it checks. List those
-paths in a `checks/untouched` script that fails when the branch changes them.
-Fail the run's own files too: nothing under `.gated/` belongs in a commit.
+paths under `protect` in `workflow.json`: the run locks them, and the agent is
+stopped at the edit, not at a gate three steps later. The run's own files are
+already covered: a tracked file under `.gated/runs/<id>` fails the checkpoint.
 
 **Cap every loop.** `gated check` is advisory and spends no attempt, so an
 orchestrator can call a failing judge again and again. Say in the step: "after
@@ -149,13 +150,21 @@ each push restarts them. Prefer gates that read evidence already on disk.
 
 **Ask the question once, early.** Some failures are decisions only a person can
 make: scope, which roles get access, a product trade-off. A judge that
-re-raises one every round costs a fix round each time. Have the rubric name
-the decision, and have the step `gated ask` the first time it appears.
+re-raises one as a FAIL every round costs a fix round each time, and no fix
+can settle it. With `"decisions": true` in `workflow.json`, judges can end with
+`VERDICT: DECISION <question>` instead: the run asks the person, spends no
+attempt, and gives the answer to every later judge. Keep it off for workflows
+nobody watches. A step that meets such a choice itself uses `gated ask`.
 
 **Test the gate before the run.** Run each `checks/` script against two
 finished examples, one that should pass and one that should fail, before it
 guards a live run. A gate that has only ever seen its happy path will either
 pass everything or block a correct run.
+
+**Then let the runs tell you.** `gated health` lists, per gate and across runs,
+the failures, blocks, judge calls and their cost, and flags the gates whose
+cost repeats: a loop, a block, a verdict that flipped on unchanged work, the
+same reason in several runs. Those are the gates to fix; the rest are working.
 
 ## Size
 

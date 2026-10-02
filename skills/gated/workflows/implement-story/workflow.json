@@ -17,6 +17,8 @@
   },
   "attempts": 5,
   "commit": true,
+  "decisions": true,
+  "protect": [],
   "before": [
     {
       "id": "acceptance-criteria",
@@ -41,7 +43,22 @@
     }
   ],
   "plan": {
-    "step": "steps/plan.md"
+    "step": "steps/plan.md",
+    "lock": [
+      "{{run}}/acceptance.md"
+    ],
+    "gates": [
+      {
+        "id": "criteria-shape",
+        "type": "command",
+        "run": "python3 \"{{workflow}}/checks/criteria.py\" \"{{run}}/acceptance.md\""
+      },
+      {
+        "id": "plan-covers",
+        "type": "command",
+        "run": "python3 \"{{workflow}}/checks/plan-covers.py\" \"{{run}}\""
+      }
+    ]
   },
   "every": [
     {

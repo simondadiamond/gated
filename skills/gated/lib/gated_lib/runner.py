@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import os
 import secrets
 import subprocess
@@ -17,7 +18,9 @@ from .core import (
     Run,
     every_collisions,
     find_workflow,
+    git_lines,
     ignore_runs,
+    protected_files,
     record_claim,
     lint_checkpoint,
     load_workflow,
@@ -90,11 +93,13 @@ def skills_for(wf: Dict[str, Any], cp: Dict[str, Any]) -> List[str]:
 
 
 def definition_files(wdir: Path, shares: Optional[List[str]] = None) -> List[Path]:
-    """Every file in the workflow folder and the folders it shares, except learnings.md: steps,
-    rubrics and check scripts. Locked for the whole run, so no gate can be loosened mid-run."""
+    """Every file in the workflow folder and the folders it shares, except learnings.md and
+    health.json (feedback, written between runs): steps, rubrics and check scripts. Locked for the
+    whole run, so no gate can be loosened mid-run."""
     files = set()
     for folder in [wdir] + [(wdir / s).resolve() for s in shares or []]:
-        files |= {p for p in folder.rglob("*") if p.is_file() and p.name != "learnings.md" and ".git" not in p.parts}
+        files |= {p for p in folder.rglob("*") if p.is_file() and p.name not in ("learnings.md", "health.json")
+                  and ".git" not in p.parts}
     return sorted(files)
 
 
@@ -151,6 +156,13 @@ def start(project: Path, name: str, args: List[str]) -> Run:
     write_json(rdir / "state.json", state)
     run = Run(rdir)
     lock(run, definition_files(wdir, wf.get("shares")))
+    if wf.get("protect"):
+        # Code outside the workflow that its gates trust (a test config, a harness a check reads).
+        # Locked like the workflow, so the agent being checked can't weaken the checker.
+        run.state["protect"] = list(wf["protect"])
+        files = protected_files(project, wf["protect"])
+        lock(run, files)
+        run.state["protectLocked"] = [str(p.resolve()) for p in files]
     if starts_running:
         activate(run)
     run.save()
@@ -241,6 +253,14 @@ def submit_plan(run: Run, path: Optional[Path] = None) -> str:
     head = run.state["checkpoints"][: run.state.get("planAt") or 0]
     run.state["checkpoints"] = head
     cps = read_plan(run, path)
+    plan = wf.get("plan", {})
+    if plan.get("approval", "human") != "judge" and plan.get("gates"):
+        # With a judge, plan gates run at the stop, before the judge is paid. With a person, they run
+        # here: a plan whose own files fail a script never reaches the person.
+        failing = [r for r in (G.evaluate(run, {"id": "plan"}, g) for g in plan["gates"]) if not r["ok"]]
+        if failing:
+            raise GatedError("the plan fails its gates, so it wasn't submitted:\n"
+                             + "\n".join(f"  - {r['id']}: {r['summary']}\n{r.get('log', '')[-800:]}" for r in failing))
     items = materialize(wf, run.workflow_dir, cps, planned=True)
     tail = materialize(wf, run.workflow_dir, wf.get("checkpoints", []), planned=False)
     run.state["checkpoints"] = head + items + tail
@@ -248,9 +268,13 @@ def submit_plan(run: Run, path: Optional[Path] = None) -> str:
     run.state["plan"] = str(snapshot(run, path, "plan"))
     run.state["status"] = "awaiting-approval"
     run.save()
-    questions = plan_questions(read_json(path))
+    data = read_json(path)
+    questions = plan_questions(data)
     asked = ("\n\nOpen questions from the planner:\n" + "\n".join(f"- {q}" for q in questions)) if questions else ""
-    return plan_summary(run.state["checkpoints"]) + asked
+    notes = [str(n) for n in data.get("notes", []) if str(n).strip()] if isinstance(data.get("notes"), list) else []
+    noted = ("\n\nNotes from the planner (for example, criteria it amended and why):\n"
+             + "\n".join(f"- {n}" for n in notes)) if notes else ""
+    return plan_summary(run.state["checkpoints"]) + noted + asked
 
 
 def amend(run: Run, path: Path) -> str:
@@ -373,13 +397,63 @@ def budget_for(run: Run, gate: Dict[str, Any]) -> int:
     return gate.get("attempts") or run.workflow().get("attempts") or DEFAULT_ATTEMPTS
 
 
-def write_log(run: Run, cp: Dict[str, Any], r: Dict[str, Any]) -> None:
+def write_log(run: Run, cp: Dict[str, Any], r: Dict[str, Any], advisory: bool = False) -> None:
     d = run.dir / cp["id"] / "gates"
     d.mkdir(parents=True, exist_ok=True)
     # Appended, not overwritten: a gate's history (each judge verdict, each rerun) is the evidence
-    # for why a checkpoint took the attempts it took.
+    # for why a checkpoint took the attempts it took. "(check)" marks an advisory `gated check`.
+    cost = f"  ${r['cost']:.2f}" if isinstance(r.get("cost"), (int, float)) else ""
     with (d / f"{r['id']}.log").open("a") as f:
-        f.write(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}  {r['summary']}\n\n{r['log']}\n\n")
+        f.write(f"{r['at']}  {'PASS' if r['ok'] else 'FAIL'}{' (check)' if advisory else ''}  {r['summary']}{cost}\n\n{r['log']}\n\n")
+
+
+def work_digest(run: Run) -> Optional[str]:
+    """A fingerprint of the work in the repository: HEAD, uncommitted changes to tracked files,
+    and untracked files git doesn't ignore. With the digest of a judge's file inputs (the plan,
+    a criteria file), two verdicts on the same fingerprint judged the same work."""
+    head = git_lines(run.project, ["rev-parse", "--verify", "-q", "HEAD"])
+    if head is None and git_lines(run.project, ["rev-parse", "--is-inside-work-tree"]) != ["true"]:
+        return None
+    h = hashlib.sha256("\n".join(head or ["(no commits)"]).encode())
+    try:
+        h.update(subprocess.run(["git", "-C", str(run.project), "diff", "HEAD" if head else "--cached"],
+                                capture_output=True, timeout=60).stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for rel in git_lines(run.project, ["ls-files", "-o", "--exclude-standard"]) or []:
+        h.update(rel.encode())
+        try:
+            h.update((run.project / rel).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:16]
+
+
+HISTORY_CAP = 2000  # per run; the oldest results go first
+
+
+def record_history(run: Run, cp: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
+    """Keep every gate result a stop counted, in order. `gated health` reads this across runs to
+    find gates that cost more than they catch. Advisory checks aren't recorded."""
+    tree = work_digest(run) if any(r["type"] == "judge" for r in results) else None
+    history = run.state.setdefault("history", [])
+    planned = "instructions" in cp
+    for r in results:
+        entry = {"at": r["at"], "cp": cp["id"], "gate": r["id"], "type": r["type"], "ok": r["ok"],
+                 "summary": r["summary"][:200]}
+        if planned:
+            entry["planned"] = True
+        for k in ("pending", "cached", "decision", "error"):
+            if r.get(k):
+                entry[k] = r[k]
+        if isinstance(r.get("cost"), (int, float)):
+            entry["cost"] = round(float(r["cost"]), 4)
+        if r.get("notMet"):
+            entry["notMet"] = r["notMet"]
+        if r["type"] == "judge" and tree:
+            entry["tree"] = hashlib.sha256(f"{tree}:{r.get('files', '')}".encode()).hexdigest()[:16]
+        history.append(entry)
+    del history[:-HISTORY_CAP]
 
 
 def commit_checkpoint(run: Run, cp: Dict[str, Any]) -> str:
@@ -466,6 +540,38 @@ def collect_splits(run: Run, cp: Dict[str, Any]) -> List[Dict[str, Any]]:
     return pending
 
 
+def new_protected_files(run: Run) -> List[str]:
+    """Files under the workflow's `protect` paths that didn't exist when the run started."""
+    patterns = run.state.get("protect") or []
+    if not patterns:
+        return []
+    locked = set(run.state.get("locks", {}))
+    return [str(p) for p in protected_files(run.project, patterns) if str(p) not in locked]
+
+
+def tracked_run_files(run: Run) -> List[str]:
+    """Files of this run that git tracks. `.gated/.gitignore` keeps them out, but `git add -f` gets
+    past it, and a run's to-do list or ledger then lands in the pull request (seen live)."""
+    try:
+        rel = run.dir.relative_to(run.project)
+    except ValueError:
+        return []
+    return git_lines(run.project, ["ls-files", "--", str(rel)]) or []
+
+
+def ask_decision(run: Run, gate_key: str, question: str, resume: str = "running") -> str:
+    """A judge said the verdict hinges on a choice only a person can make. Ask it once, spend no
+    attempt, and pass the answer to every later judge call in this run."""
+    text = f"{gate_key}: {question}"
+    n = 1 + len(run.state.get("answers", []))
+    (run.dir / f"question-{n}.md").write_text(text + "\n")
+    run.state["question"] = {"text": text[:2000], "at": now(), "resume": resume, "from": "judge"}
+    run.state["status"] = "waiting"
+    run.save()
+    return (f"A judge needs a decision only the person can make: {question}\nPut it to them as written and "
+            "end your turn. No attempt was spent; their answer goes to the judge on the next stop.")
+
+
 def question_path(run: Run) -> Path:
     return run.dir / "question.md"
 
@@ -487,7 +593,8 @@ def take_question(run: Run) -> str:
 
 def answer(run: Run, text: str) -> str:
     q = run.state.pop("question")
-    run.state.setdefault("answers", []).append({"question": q["text"], "answer": text.strip()[:2000], "at": now()})
+    run.state.setdefault("answers", []).append({"question": q["text"], "answer": text.strip()[:2000], "at": now(),
+                                                "from": q.get("from", "agent")})
     run.state["status"] = q["resume"]
     run.save()
     return "gated: recorded your answer. The run continues; its gates still have to pass."
@@ -496,6 +603,7 @@ def answer(run: Run, text: str) -> str:
 def block(run: Run, reasons: List[str]) -> str:
     run.state["status"] = "blocked"
     run.state["blockedOn"] = reasons
+    run.state.setdefault("blocks", []).append({"at": now(), "on": reasons})
     run.save()
     write_report(run)
     return (f"Run {run.id} is blocked: {', '.join(reasons)}. No gate was skipped. "
@@ -547,7 +655,7 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
             if acceptance.is_file():
                 inputs.append({"file": str(acceptance)})
         gate = {"id": "plan-review", "type": "judge", "rubric": plan["rubric"], "inputs": inputs}
-        for key in ("maxChars", "timeout"):
+        for key in ("maxChars", "timeout", "decisions"):
             if key in plan:
                 gate[key] = plan[key]
         if code_failing:
@@ -557,6 +665,10 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         else:
             review = G.check_judge(run, plan_cp, gate)
             write_log(run, plan_cp, review)
+        record_history(run, plan_cp, code_results + ([] if code_failing else [review]))
+        if review.get("decision"):
+            # Not a rejection: the plan stays submitted, and the judge sees the answer next stop.
+            return True, ask_decision(run, "plan/plan-review", review["decision"], resume="awaiting-approval")
         errors = run.state.setdefault("judgeErrors", {})
         if review.get("error") and errors.get("plan", 0) + 1 < JUDGE_ERROR_RETRIES:
             # No verdict is not a rejection: keep the plan, spend no attempt, retry on the next stop.
@@ -616,9 +728,18 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
                         "summary": "split stories that don't resolve on GitHub: "
                         + "; ".join(f"{x['url']} ({x.get('check') or x['why']})" for x in unverified)})
     changed = G.changed_locks(run)
-    if changed:
+    added = new_protected_files(run)
+    if changed or added:
+        parts = (["locked files changed since they were locked: " + ", ".join(changed)] if changed else []) + (
+            ["new files under the workflow's protected paths: " + ", ".join(added[:5])] if added else [])
         results.append({"id": "locks", "type": "locks", "ok": False, "at": now(), "log": "",
-                        "summary": "locked files changed since they were locked: " + ", ".join(changed)})
+                        "summary": "; ".join(parts) + (". Protected paths change in their own change, outside a run"
+                                                        if added else "")})
+    tracked = tracked_run_files(run)
+    if tracked:
+        results.append({"id": "run-files", "type": "run-files", "ok": False, "at": now(), "log": "",
+                        "summary": "this run's own files are tracked by git: " + ", ".join(tracked[:5])
+                        + ". Remove them with `git rm --cached` in a new commit; never `git add -f` under .gated/"})
     gate_by_id = {g["id"]: g for g in cp["gates"]}
     checked_at = now()
     pending_since = run.state.setdefault("pendingSince", {}) if move else dict(run.state.get("pendingSince", {}))
@@ -650,7 +771,9 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
             if key.startswith(prefix) and key not in pending_keys:
                 del pending_since[key]
     for r in results:
-        write_log(run, cp, r)
+        write_log(run, cp, r, advisory=not move)
+    if move:
+        record_history(run, cp, results)
     failing = [r for r in results if not r["ok"] and r["type"] != "human" and not r.get("pending")]
     human = [r for r in results if not r["ok"] and r["type"] == "human"]
     if not move:
@@ -705,6 +828,8 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
                 errors.pop(f"{cp['id']}/{r['id']}", None)
         for r in failing:
             key = f"{cp['id']}/{r['id']}"
+            if r.get("decision"):
+                continue  # a question for the person, not a verdict on the work
             if r.get("error") and errors.get(key, 0) + 1 < JUDGE_ERROR_RETRIES:
                 errors[key] = errors.get(key, 0) + 1  # no verdict says nothing about the work
                 continue
@@ -715,6 +840,11 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
     lines = [f"- {r['id']} ({r['type']}): {r['summary']}" for r in failing]
     if exhausted:
         return True, block(run, [f"{cp['id']}/{r['id']}" for r in exhausted])
+    decision = next((r for r in failing if r.get("decision")), None)
+    if decision and move:
+        others = [r for r in failing if r is not decision and not r.get("decision")]
+        note = ("\nThese gates also failed and spent an attempt: " + ", ".join(r["id"] for r in others)) if others else ""
+        return True, ask_decision(run, f"{cp['id']}/{decision['id']}", decision["decision"]) + note
     run.save()
     tries = ""
     if count_attempts:

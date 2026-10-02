@@ -1,7 +1,7 @@
 ---
 name: gated
 description: Run a workflow as a series of checkpoints, each blocked by gates that code checks instead of the agent. Use when the user types /gated, asks to run a named workflow (implement-story, weekly-report, onboarding or any of their own), wants a long job done "properly" with enforced tests or reviews, wants to create a new repeatable workflow, or asks for the status of a gated run. Also the entry point for scheduled tasks that run a workflow by name.
-argument-hint: "[workflow] [key=value ...] | new <name> | customize <workflow> | status | findings | resume [run]"
+argument-hint: "[workflow] [key=value ...] | new <name> | customize <workflow> | status | findings | health | resume [run]"
 allowed-tools: Bash(python3 *bin/gated*)
 ---
 
@@ -47,6 +47,7 @@ person, and ask them to restart the session.
 | empty | Show the picker. See "Picking a workflow". |
 | `status` | Run `gated status` and summarize it in a few lines. |
 | `findings [--since 30d]` | Run `gated findings` and group what keeps coming up. Suggest a workflow change or a `gated learn` line for anything repeated. |
+| `health [--since 30d]` | Run `gated health` and walk its candidates with the person, as in "Improving the workflow". |
 | `resume [run]` | Run `gated resume [--run <id>]`, then continue the loop below from wherever the run is. |
 | `new <name>` | Write a new workflow with the person. See "Writing a workflow". |
 | `customize <workflow>` | Make a workflow the team's own. See "Customizing a workflow". |
@@ -126,6 +127,53 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
    - If they want changes, write them as checkpoints in a JSON file (same shape
      as a plan, with gates), run `gated amend <file>`, and get their approval
      the same way. They can type `reject` to drop the new checkpoints.
+6. **Improve the workflow.** Last, follow "Improving the workflow" below for
+   this run. It usually takes one command and no question.
+
+### Improving the workflow
+
+A gate that failed once and then passed did its job. A gate that loops,
+blocks, flips its verdict or fails the same way run after run costs time and
+money every run, and a small change to the workflow usually stops it. After
+every finished run (done, or cancelled after real work):
+
+1. Run `gated health --run <id>`. If it lists no candidates, say so in one line
+   and stop.
+2. For each candidate, read that gate's log in the run folder
+   (`<checkpoint>/gates/<gate>.log`) and decide, in three short lines:
+   - **What happened**: the gate, how many stops it failed, what it cost.
+   - **Whose fault**:
+     - *the work*: the gate was right, the step kept getting it wrong;
+     - *the gate*: too strict for what it guards, impossible for its step to
+       pass with what that step may change, fed noisy inputs, or reopening a
+       question settled earlier;
+     - *outside*: the environment, a missing tool or test account, another run.
+   - **The smallest change**:
+     - for the work, a sentence in the step's instructions, or a
+       `gated learn` line, so the next agent gets it right the first time;
+     - for the gate, the narrowest edit to the gate, its rubric or its step;
+     - for something outside, a `gated learn` line or a new story.
+3. Two rules decide what's worth proposing:
+   - Never loosen a gate because the work was wrong. Fix the instructions.
+   - If a change would let through work the gate exists to stop, it isn't
+     worth it. Say so and recommend keeping the gate.
+4. Ask the person about one candidate at a time with your question tool
+   (AskUserQuestion in Claude Code), header the gate's id:
+   "<what happened>. Likely again, because <the signal health gave>.
+   Change: <the smallest change>?" Options: "Yes, change it", "No, keep it as
+   it is" and "Not now". Put your recommendation first and mark it
+   Recommended: "Yes" when the change is worth it, "No" when rule 3 says it
+   isn't.
+
+   Without a question tool, print the same as a numbered list.
+5. Apply each yes. The run is over, so nothing is locked. Edit the workflow
+   files, run `gated lint <workflow>`, and say which files changed. A project
+   workflow belongs on the main branch: commit the change there, never on the
+   story's branch, where it would show up in the story's pull request.
+6. For each "No, keep it as it is", run
+   `gated health --run <id> --dismiss <gate> --reason "<their reason>"`, so
+   the next run doesn't ask again unless the gate fails again. "Not now"
+   records nothing.
 
 ### Rules that keep it honest
 
@@ -157,6 +205,10 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
   run waits without spending an attempt, and their next message answers it.
   Don't end your turn to wait any other way: every other stop reruns the gates
   and counts.
+- A judge can stop the run with a decision only the person can make (the stop
+  hook says "A judge needs a decision"). Put the question to them exactly as
+  written and end your turn. Their reply is recorded as the answer, and the
+  judge sees it on the next stop. Don't answer it yourself.
 - Keep the person's interruptions to one decision each.
 
 ### Scheduled and headless runs
@@ -166,7 +218,10 @@ Codex automation, don't ask questions. Run the loop to the end. A plan with
 human approval stops as `awaiting-approval`; a plan with judge approval can
 continue unattended. A human gate stops as `waiting`, which is correct. Run
 `gated report` last, and end your reply with the report's path and the run's
-status.
+status. When the run is done, do steps 1 to 3 of "Improving the workflow" and
+write the result to `<run folder>/retro.md`, one candidate per section with
+its three lines and the change you'd propose. Change nothing: a person reads
+it and decides. Name the file in your reply.
 
 ## Customizing a workflow
 
@@ -188,6 +243,8 @@ copy the team owns, and the copy then wins over the original.
      checkpoint for one step, or on `"plan"` for the planner;
    - `"storySkill"` for the skill that writes new stories when work is split
      off;
+   - `"protect"` for code outside the workflow that its gates trust (the
+     test config, a harness a check script reads);
    - gates and rubrics for their standards. Read
      `references/writing-gates.md` first, especially "Gates that cost more
      than they catch": a team's own gates are where most wasted rounds come
