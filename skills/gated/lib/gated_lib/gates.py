@@ -16,7 +16,7 @@ LOG_TAIL = 4000
 URL_RE = re.compile(r"https?://[^\s)<>\]\"'`]+")
 TODO_RE = re.compile(r"^\s*[-*]\s+\[( |x|X)\]\s*(.*)$")
 STRUCK_RE = re.compile(r"^~~.+?~~\s*(?:[-:–—]\s*)?(\S.*)$")
-VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)\b", re.IGNORECASE)
+VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL|DECISION)\b[ \t:]*([^\n]*)", re.IGNORECASE)
 
 JUDGE_PREAMBLE = """You are an independent reviewer. You did not do this work and you share no \
 context with whoever did. Judge it only against the rubric below and the inputs that follow it. \
@@ -25,6 +25,12 @@ Do not change any files. Be strict: a criterion that is not clearly met is not m
 List every criterion from the rubric with MET or NOT MET and one line of evidence. Report every \
 NOT MET item you find in this one pass; don't stop at the first, because the work is fixed from your \
 list and judged again. Then end your reply with exactly one line, either `VERDICT: PASS` or `VERDICT: FAIL`.
+
+One exception. If the verdict hinges on a choice only a person can make (what is in scope, who gets \
+access, a product trade-off) and neither the inputs nor the decisions listed below settle it, end \
+instead with `VERDICT: DECISION <the question, in one line>`. The run pauses and asks the person; \
+their answer comes back to you. Don't use it for anything the inputs can settle, and don't ask a \
+question the decisions below already answer.
 """
 
 
@@ -223,6 +229,10 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
         if cut:
             cuts.append(f"{label} by {cut} chars")
     cut_suffix = " (cut: " + "; ".join(cuts) + ")" if cuts else ""
+    answers = run.state.get("answers", [])
+    if answers:
+        parts.append("## Decisions the person made in this run\n")
+        parts += [f"- Q: {a['question']}\n  A: {a['answer']}" for a in answers]
     prompt = "\n".join(parts)
     key = f"{cp['id']}/{gate['id']}"
     digest = sha256_text(prompt)
@@ -243,7 +253,18 @@ def check_judge(run: Run, cp: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str,
     verdicts = VERDICT_RE.findall(out)
     if not verdicts:
         return judge_error(gate, f"the {kind} judge gave no VERDICT line" + cut_suffix, out)
-    ok = verdicts[-1].upper() == "PASS"
+    verdict, rest = verdicts[-1][0].upper(), verdicts[-1][1].strip()
+    if verdict == "DECISION":
+        question = rest or "(the judge asked for a decision without stating it)"
+        asked = {a["question"].split(": ", 1)[-1].strip().lower() for a in answers}
+        if question.lower() in asked:
+            # Asked and answered already: the answer was in the prompt. Treat it as the FAIL it is.
+            return result(gate, False, f"{kind} judge: FAIL (asked again a decision the person already made: {question})"
+                          + cut_suffix, out)
+        decided = result(gate, False, f"{kind} judge needs a decision: {question}" + cut_suffix, out)
+        decided["decision"] = question
+        return decided
+    ok = verdict == "PASS"
     summary = f"{kind} judge: {'PASS' if ok else 'FAIL'}" + cut_suffix
     run.state["judgeCache"][key] = {"hash": digest, "ok": ok, "summary": summary, "log": out[-LOG_TAIL:]}
     return result(gate, ok, summary, out)

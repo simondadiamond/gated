@@ -1126,3 +1126,73 @@ class ProtectTest(GatedCase):
         for bad in (["/etc/passwd"], ["../other"], [".gated/runs"], "harness"):
             self.assertTrue(any("protect" in e for e in lint_workflow({**base, "protect": bad}, None)), bad)
         self.assertFalse(any("protect" in e for e in lint_workflow({**base, "protect": ["harness/", "*.cfg"]}, None)))
+
+
+class JudgeDecisionTest(GatedCase):
+    def judge_script(self, answered_marker):
+        # Asks once; once the person's answer is in the prompt, passes.
+        prompt = self.tmp / "prompt"
+        return (f"cat > {prompt}; if grep -q '{answered_marker}' {prompt}; then echo 'VERDICT: PASS'; "
+                "else echo 'VERDICT: DECISION Should group managers see the panel?'; fi")
+
+    def test_a_checkpoint_decision_asks_the_person_and_spends_no_attempt(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = self.judge_script("only managers")
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=2)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        code, out, _ = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 0)
+        run = self.run_obj()
+        self.assertEqual(run.status, "waiting")
+        self.assertIn("Should group managers see the panel?", run.state["question"]["text"])
+        self.assertEqual(run.state["attempts"], {})
+        self.hook("prompt", {"session_id": "owner", "prompt": "No, only managers for now."})
+        self.assertEqual(self.run_obj().status, "running")
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")
+        self.assertIn("Decisions the person made in this run", (self.tmp / "prompt").read_text())
+
+    def test_asking_an_answered_decision_again_is_a_fail(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: DECISION Should group managers see the panel?'"
+        self.simple_workflow([{"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.hook("stop", {"session_id": "owner"})
+        self.hook("prompt", {"session_id": "owner", "prompt": "No."})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 2, err)
+        self.assertIn("already made", err)
+        self.assertEqual(self.run_obj().state["attempts"], {"one/review": 1})
+
+    def test_other_failing_gates_still_spend_an_attempt(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: DECISION Which roles?'"
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"},
+                              {"id": "review", "type": "judge", "rubric": "be strict"}], attempts=3)
+        run = self.start(session="owner")
+        self.todos_done(run)
+        code, out, _ = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 0)
+        run = self.run_obj()
+        self.assertEqual((run.status, run.state["attempts"]), ("waiting", {"one/t": 1}))
+
+    def test_a_plan_judge_decision_keeps_the_plan_and_asks(self):
+        import os
+        os.environ["GATED_JUDGE_CMD"] = self.judge_script("read-only")
+        self.workflow("judged", {"plan": {"step": "plan.md", "approval": "judge", "rubric": "rubric.md"}},
+                      {"plan.md": "Plan it.", "rubric.md": "Approve a sound plan."})
+        run = self.start("judged")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "build", "title": "Build", "instructions": "Build it", "gates": []}]}))
+        self.submit_plan()
+        may_stop, message = runner.check(self.run_obj())
+        self.assertTrue(may_stop)
+        run = self.run_obj()
+        self.assertEqual(run.status, "waiting")
+        self.assertNotIn("plan", run.state["attempts"])
+        self.hook("prompt", {"session_id": "s1", "prompt": "read-only for them"})
+        self.assertEqual(self.run_obj().status, "awaiting-approval")
+        runner.check(self.run_obj())
+        self.assertEqual(self.run_obj().status, "running")
