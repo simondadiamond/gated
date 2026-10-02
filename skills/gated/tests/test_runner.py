@@ -379,6 +379,40 @@ class JudgePlanApprovalTest(GatedCase):
         self.assertIn("## The last plan was rejected", runner.step_brief(run))
         self.assertEqual(run.state["checkpoints"], [])
 
+    def test_judge_timeout_keeps_plan_and_spends_no_attempt(self):
+        import os
+        run = self.make_run()
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; sleep 5"
+        wf = json.loads((run.workflow_dir / "workflow.json").read_text())
+        wf["plan"]["timeout"] = 1
+        (run.workflow_dir / "workflow.json").write_text(json.dumps(wf))
+        may_stop, message = runner.check(run)
+        self.assertFalse(may_stop)
+        self.assertIn("no verdict", message)
+        self.assertIn("timed out", message)
+        run = self.run_obj()
+        self.assertEqual(run.status, "awaiting-approval")
+        self.assertEqual(run.state["attempts"].get("plan", 0), 0)
+        self.assertEqual(run.state["checkpoints"][-1]["id"], "build")
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo 'VERDICT: PASS'"
+        may_stop, message = runner.check(run)
+        self.assertIn("judge approved the plan", message)
+        self.assertNotIn("plan", self.run_obj().state.get("judgeErrors", {}))
+
+    def test_judge_without_verdict_counts_after_retries(self):
+        import os
+        run = self.make_run(attempts=5)
+        os.environ["GATED_JUDGE_CMD"] = "cat >/dev/null; echo thinking"
+        for _ in range(runner.JUDGE_ERROR_RETRIES - 1):
+            runner.check(run)
+            run = self.run_obj()
+            self.assertEqual(run.status, "awaiting-approval")
+        may_stop, message = runner.check(run)
+        self.assertIn("judge rejected the plan", message)
+        run = self.run_obj()
+        self.assertEqual(run.status, "planning")
+        self.assertEqual(run.state["attempts"]["plan"], 1)
+
     def test_judge_fail_to_budget_blocks_and_resume_replans(self):
         run = self.make_run("FAIL", attempts=2)
         runner.check(run)

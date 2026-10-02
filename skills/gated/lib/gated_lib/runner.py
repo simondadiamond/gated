@@ -30,6 +30,9 @@ from .core import (
     write_json,
 )
 
+# A plan judge that gives no verdict is retried on the next stop this many times before it counts.
+JUDGE_ERROR_RETRIES = 3
+
 TODOS_GATE = {"id": "todos", "type": "todos"}
 FRESH_GATE = {"id": "fresh-context", "type": "fresh-context"}
 
@@ -510,6 +513,14 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         plan_cp = {"id": "plan"}
         review = G.check_judge(run, plan_cp, gate)
         write_log(run, plan_cp, review)
+        errors = run.state.setdefault("judgeErrors", {})
+        if review.get("error") and errors.get("plan", 0) + 1 < JUDGE_ERROR_RETRIES:
+            # No verdict is not a rejection: keep the plan, spend no attempt, retry on the next stop.
+            errors["plan"] = errors.get("plan", 0) + 1
+            run.save()
+            return False, (f"The judge gave no verdict ({review['summary']}). The plan stands and no attempt "
+                           "was spent. End your turn again and the stop hook retries the judge.")
+        errors.pop("plan", None)
         if review["ok"]:
             cp = approve_awaiting(run, review["summary"], by="judge")
             return False, f"The judge approved the plan. Next is '{cp['id']}': run `gated step` for its brief."
