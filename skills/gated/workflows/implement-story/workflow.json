@@ -17,6 +17,7 @@
   },
   "attempts": 5,
   "commit": true,
+  "decisions": true,
   "protect": [],
   "before": [
     {

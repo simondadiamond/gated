@@ -139,6 +139,10 @@ def stop(payload: Dict[str, Any]) -> Decision:
             # Hold the stop once, so the agent tells the person instead of going quiet. The next
             # stop finds the run finished and goes through without spending an attempt.
             return Decision(2, f"gated: {message}\nTell the person now: summarize {run.dir / 'report.md'} in a few lines, then stop.")
+        if run.status == "waiting" and before != "waiting" and (run.state.get("question") or {}).get("from") == "judge":
+            # Same for a judge's decision: hold once so the agent puts the question to the person.
+            # The next stop finds the run waiting and goes through without spending an attempt.
+            return Decision(2, f"gated: {message}")
     if may_stop:
         return Decision(stdout=json.dumps({"systemMessage": f"gated: {message}"}))
     return Decision(2, f"gated: {message}")

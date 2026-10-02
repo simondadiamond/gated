@@ -145,6 +145,8 @@ def lint_judge_options(value: Dict[str, Any], where: str, wdir: Optional[Path], 
         errors.append(f"{where}: maxChars must be an integer >= 1000")
     if "timeout" in value and not (type(value["timeout"]) is int and value["timeout"] > 0):
         errors.append(f"{where}: timeout must be a positive integer")
+    if "decisions" in value and not isinstance(value["decisions"], bool):
+        errors.append(f"{where}: decisions must be true or false")
     inputs = value.get("inputs", [])
     if not isinstance(inputs, list):
         errors.append(f"{where}: inputs must be a list of objects with either 'run' or 'file'")
@@ -258,6 +260,8 @@ def lint_workflow(data: Any, wdir: Optional[Path]) -> List[str]:
     for key in ("storySkill", "basedOn"):
         if key in data and not (isinstance(data[key], str) and data[key].strip()):
             errors.append(f"'{key}' must be a non-empty string")
+    if "decisions" in data and not isinstance(data["decisions"], bool):
+        errors.append("'decisions' must be true or false")
     if "freshContext" in data and not isinstance(data["freshContext"], bool):
         errors.append("'freshContext' must be true or false")
     shares = data.get("shares", [])

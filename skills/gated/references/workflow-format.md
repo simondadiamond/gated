@@ -45,6 +45,7 @@ Run `gated lint <name>` after every change.
 | `attempts` | How many failed stop attempts a gate gets before the run is `blocked`. Default 5. A gate can set its own. |
 | `commit` | `true` commits the project once per passed checkpoint. For code workflows. |
 | `freshContext` | `false` turns off the fresh-subagent rule. Default `true`. |
+| `decisions` | `true` lets judges return a decision for the person instead of a verdict. Default `false`. See "Gates". |
 | `skills` | Skills every checkpoint's subagent must load. A checkpoint can list its own `skills` too. |
 | `storySkill` | The skill a step uses to create a new story when it splits work off. Default: `gh issue create`. |
 | `shares` | Folders, relative to this one, whose files the workflow uses (shared steps, rubrics, check scripts). They're locked with the workflow for the whole run. Lets several workflows, like a lite and a full path, share one set of checks. |
@@ -171,11 +172,15 @@ an outside system can set `pendingExit` to an exit code from 1 to 255, except
 pending longer than `pendingMax` seconds, 21600 by default, it becomes a normal
 failure. These fields are allowed only on command gates.
 
-A judge ends with `VERDICT: PASS`, `VERDICT: FAIL` or, when the verdict hinges
-on a choice only a person can make, `VERDICT: DECISION <question>`. A decision
-pauses the run as `waiting` with that question and spends no attempt (a plan
-stays submitted). Every later judge call in the run receives the person's
-answers. Asking again a question already answered counts as a FAIL.
+A judge ends with `VERDICT: PASS` or `VERDICT: FAIL`. With `"decisions": true`
+on the workflow (or on one judge gate, or on `plan`), a judge may also end with
+`VERDICT: DECISION <question>` when the verdict hinges on a choice only a
+person can make. A decision pauses the run as `waiting` with that question and
+spends no attempt (a plan stays submitted); the stop hook holds the turn once
+so the agent puts the question to the person. Every later judge call in the
+run receives the person's answers. Asking again a question already answered
+counts as a FAIL. Leave it off for unattended workflows: without it a judge is
+never offered the choice, and a DECISION it returns anyway is a judge error.
 
 A judge input uses its own `maxChars`, then the judge gate's `maxChars`, then
 200000 by default. The value must be an integer of at least 1000. Oversized
