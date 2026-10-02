@@ -4,7 +4,9 @@ branch, review it yourself the way it will.
 1. Read `git diff {{input.base}}...HEAD` in full.
 2. Check it against the rubric: correctness, tests that prove behavior, no
    unrelated changes, no leftovers, errors handled, the story fully done.
-3. Fix what you find. Keep each fix small and in the same style as the code
+3. Stay inside the story. Work split off into its own story belongs to that
+   story; don't build it here.
+4. Fix what you find. Keep each fix small and in the same style as the code
    around it. Commit with a message that says what the fix is for. A fix to
    behavior gets a test that fails without it. Put it in a new test file:
    the tests written earlier are locked and can't change.

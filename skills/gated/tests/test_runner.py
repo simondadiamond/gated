@@ -1196,3 +1196,22 @@ class JudgeDecisionTest(GatedCase):
         self.assertEqual(self.run_obj().status, "awaiting-approval")
         runner.check(self.run_obj())
         self.assertEqual(self.run_obj().status, "running")
+
+
+class HumanPlanGatesTest(GatedCase):
+    def test_plan_gates_refuse_a_submission_before_the_person_sees_it(self):
+        plan = {"step": "plan.md", "gates": [{"id": "ledger", "type": "command", "run": "test -f {{run}}/ledger.md"}]}
+        self.workflow("story", {"plan": plan}, {"plan.md": "Plan it."})
+        run = self.start("story")
+        (run.dir / "checkpoints.json").write_text(json.dumps({
+            "notes": ["AC-3 contradicted the story; now says the request is refused"],
+            "checkpoints": [{"id": "build", "title": "Build", "instructions": "Build it", "gates": []}]}))
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 1)
+        self.assertIn("fails its gates", err)
+        self.assertEqual(self.run_obj().status, "planning")
+        (run.dir / "ledger.md").write_text("ok")
+        code, out, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+        self.assertIn("AC-3 contradicted the story", out)
+        self.assertEqual(self.run_obj().status, "awaiting-approval")

@@ -192,6 +192,8 @@ copy the team owns, and the copy then wins over the original.
      checkpoint for one step, or on `"plan"` for the planner;
    - `"storySkill"` for the skill that writes new stories when work is split
      off;
+   - `"protect"` for code outside the workflow that its gates trust (the
+     test config, a harness a check script reads);
    - gates and rubrics for their standards. Read
      `references/writing-gates.md` first, especially "Gates that cost more
      than they catch": a team's own gates are where most wasted rounds come

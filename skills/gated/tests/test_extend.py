@@ -181,6 +181,19 @@ class ImplementStoryChecksTest(GatedCase):
         test_file.write_text(test_file.read_text() + 'test("AC-2: edge", ...)\n')
         self.assertEqual(self.run_script(self.script("criteria-covered.py"), run).returncode, 0)
 
+    def test_every_criterion_needs_a_planned_checkpoint(self):
+        run = self.tmp / "run"
+        run.mkdir()
+        (run / "acceptance.md").write_text("- AC-1: Given a, when b, then c.\n- AC-2: Given a, when b, then c.\n")
+        (run / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "a", "instructions": "Covers AC-1. Build the model.", "gates": []}]}))
+        p = self.run_script(self.script("plan-covers.py"), run)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("AC-2", p.stderr)
+        (run / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "a", "instructions": "Covers AC-1 and AC-2.", "gates": []}]}))
+        self.assertEqual(self.run_script(self.script("plan-covers.py"), run).returncode, 0)
+
     def test_committing_workflow_needs_git_identity(self):
         # Live run 2026-09-30: the first auto-commit failed mid-run on a clone with no identity.
         self.use_example("implement-story")
