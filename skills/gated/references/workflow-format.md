@@ -184,6 +184,10 @@ and report the cut in the gate summary.
 ```
 
 Starting a run writes `.gated/.gitignore`, so run folders never show up in git.
+`git add -f` gets past it, so in a git repository every checkpoint also
+checks that no file of the current run is tracked (`run-files`). A tracked
+to-do list or ledger fails the checkpoint until a new commit removes it with
+`git rm --cached`.
 
 ## Statuses
 
