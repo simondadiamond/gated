@@ -68,6 +68,11 @@ def cmd_health(a: argparse.Namespace) -> str:
     cutoff = since_cutoff(a.since)
     focus = resolve_run(project, a.run, finished=True) if a.run else None
     wanted = a.workflow or (focus.state["workflow"] if focus else None)
+    if a.dismiss:
+        if not wanted:
+            raise GatedError("name the workflow: --workflow <name> or --run <id>")
+        wdir = focus.workflow_dir if focus else find_workflow(wanted, project)
+        return health.dismiss(wdir, a.dismiss, a.reason or "")
     runs = [r for r in list_runs(project) if r.state.get("updatedAt", "") >= cutoff
             and (not wanted or r.state["workflow"] == wanted)]
     if focus and focus.id not in {r.id for r in runs}:
@@ -77,7 +82,8 @@ def cmd_health(a: argparse.Namespace) -> str:
     by_workflow: dict = {}
     for r in runs:
         by_workflow.setdefault(r.state["workflow"], []).append(r)
-    results = {wf: health.analyze(rs, focus) for wf, rs in sorted(by_workflow.items())}
+    results = {wf: health.analyze(rs, focus, health.load_dismissed(rs[-1].workflow_dir))
+               for wf, rs in sorted(by_workflow.items())}
     if a.json:
         return json.dumps({wf: {"runs": res["runs"], "candidates": res["candidates"]} for wf, res in results.items()},
                           indent=2)
@@ -234,6 +240,8 @@ def parser() -> argparse.ArgumentParser:
     sp.add_argument("--since", help="12h, 30d, 2w...")
     sp.add_argument("--workflow")
     sp.add_argument("--json", action="store_true", help="candidates as JSON")
+    sp.add_argument("--dismiss", metavar="GATE", help="keep a flagged gate as it is, e.g. review/constitution")
+    sp.add_argument("--reason", help="why the gate stays as it is (with --dismiss)")
     add("resume", cmd_resume, "hand a run to this session")
     add("report", cmd_report, "write and print the run report")
     sp = add("learn", cmd_learn, "append feedback to a workflow's learnings.md")

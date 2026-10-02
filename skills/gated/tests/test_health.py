@@ -126,3 +126,40 @@ class JudgeOutputTest(GatedCase):
                "4. **Scoped.** NOT MET. The diff adds\n"
                "A long explanation of the data model and its many details explains why AC-4 is NOT MET here.\n")
         self.assertEqual(G.not_met(out), ["tested", "criterion 0: the contract still matches the issue", "scoped"])
+
+
+class DismissTest(GatedCase):
+    def looping_run(self, session):
+        run = self.start(session=session)
+        self.todos_done(run)
+        for _ in range(3):
+            self.hook("stop", {"session_id": session})
+        return run
+
+    def test_a_dismissed_gate_returns_only_with_new_failures(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "false"}], attempts=9)
+        run = self.looping_run("s1")
+        code, out, err = self.gated("health", "--run", run.id, "--dismiss", "one/t", "--reason", "it catches real bugs")
+        self.assertEqual(code, 0, err)
+        self.assertIn("won't be flagged again", out)
+        self.assertNotIn("Candidates for a workflow change", self.gated("health")[1])
+        self.hook("prompt", {"session_id": "s1", "prompt": "cancel run"})
+        import time
+        time.sleep(1.1)  # timestamps have one-second resolution
+        self.looping_run("s2")
+        self.assertIn("one/t: failed 3 times", self.gated("health")[1])
+
+    def test_dismissing_mid_run_does_not_break_its_locks(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
+        run = self.start(session="owner")
+        self.todos_done(run)
+        self.gated("health", "--workflow", "demo", "--dismiss", "one/t", "--reason", "fine")
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "done")
+
+    def test_dismiss_needs_a_reason(self):
+        self.simple_workflow([{"id": "t", "type": "command", "run": "true"}])
+        self.start()
+        code, _, err = self.gated("health", "--workflow", "demo", "--dismiss", "one/t")
+        self.assertEqual(code, 1)
+        self.assertIn("say why", err)
