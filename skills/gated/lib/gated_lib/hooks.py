@@ -29,11 +29,22 @@ WRITE_HINT_RE = re.compile(r"(>|\btee\b|\bsed\b|\brm\b|\bmv\b|\bcp\b|\bln\b|\btr
 GATED_CALL_RE = re.compile(r"""^\s*(?:python3\s+)?["']?[^\s"';&|]*\bgated["']?\s+[a-z-]+\b""")
 HARMLESS_REDIRECT_RE = re.compile(r"\d*>&\d|\d*>\s*/dev/null")
 # A '>' inside quotes is an argument, not a redirect: `gh pr list --search "merged:>=2026-09-23"`.
-QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+# An escaped character (`\'`, `\>`) is a plain character, so it neither opens a quote nor redirects.
+QUOTED_RE = re.compile(r"\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\"", re.S)
 
 
 def unquoted(command: str) -> str:
-    return HARMLESS_REDIRECT_RE.sub("", QUOTED_RE.sub('""', command))
+    return HARMLESS_REDIRECT_RE.sub("", QUOTED_RE.sub(lambda m: "_" if m.group().startswith("\\") else '""', command))
+
+
+def split_outside_quotes(command: str, separator: str) -> List[str]:
+    """Split on a separator only where the shell would: `python3 -c "a;b"` is one command."""
+    parts, start = [], 0
+    for m in re.finditer(QUOTED_RE.pattern + "|(" + separator + ")", command, re.S):
+        if m.group(1) is not None:
+            parts.append(command[start:m.start()])
+            start = m.end()
+    return parts + [command[start:]]
 CHAINING_RE = re.compile(r";|&&|\|\||`|\$\(|\n")
 
 
@@ -47,6 +58,7 @@ def is_gated_call(command: str) -> bool:
 # left out because the orchestrator runs read-only python and node all the time.
 EDIT_HINT_RE = re.compile(r"(>|\btee\b|\bsed\s+-i|\brm\b|\bmv\b|\bcp\b|\bln\b|\btruncate\b|\binstall\b|\bgit\s+(checkout|restore|stash|reset|apply|commit|merge|rebase)\b)")
 SEGMENT_RE = re.compile(r";|&&|\|\||\n")
+PIPE = r"\|"
 PIPELINE_RE = re.compile(r";|&&|\|\|?|\n")
 
 
@@ -83,10 +95,45 @@ _SCRATCH_PATH = r"(?:(?:/(?:private/)?tmp|\$\{?TMPDIR\}?)/|(?:" + _PATH_CHAR + r
 SCRATCH_REDIRECT_RE = re.compile(r"\d*>>?\s*(?:\"" + _SCRATCH_PATH + r"\"|" + _SCRATCH_PATH + r"(?=[\s;&|)]|$))")
 
 
+SCRATCH_PATH_RE = re.compile(_SCRATCH_PATH)
+# Deleting, moving or copying scratch files is the same as redirecting into them.
+SCRATCH_FILE_COMMANDS = {"rm", "mv", "cp", "tee"}
+# One shell word, quotes kept. A lone unclosed quote stays in the word, so that path matches nothing.
+SHELL_WORD_RE = re.compile(r"(?:" + QUOTED_RE.pattern + r"|[^\s'\"\\]|['\"\\])+", re.S)
+REDIRECT_WORD_RE = re.compile(r"\d*>>?(&\d+|/dev/null)?")
+
+
+def scratch_files_only(stage: str) -> bool:
+    """rm, mv, cp or tee whose every path is in a temp folder or the run folder, bare or double-quoted.
+    A path with `..`, `$(`, single quotes or an unclosed quote doesn't count, the same as for redirects."""
+    if ">" in unquoted(stage):
+        return False
+    words = SHELL_WORD_RE.findall(stage)
+    if not words or words[0] not in SCRATCH_FILE_COMMANDS:
+        return False
+    paths: List[str] = []
+    options, skip = True, False
+    for word in words[1:]:
+        redirect = REDIRECT_WORD_RE.fullmatch(word)
+        if skip or redirect:  # the check above left only /dev/null and fd dups; a bare '>' takes the next word
+            skip = bool(redirect) and redirect.group(1) is None
+        elif options and word == "--":
+            options = False
+        elif not (options and word.startswith("-")):
+            paths.append(word[1:-1] if len(word) > 1 and word[0] == word[-1] == '"' else word)
+    return bool(paths) and all(SCRATCH_PATH_RE.fullmatch(p) for p in paths)
+
+
 def edits_files(command: str) -> bool:
-    for segment in SEGMENT_RE.split(command):
-        if segment.strip() and not is_gated_call(segment) and EDIT_HINT_RE.search(unquoted(SCRATCH_REDIRECT_RE.sub("", segment))):
-            return True
+    # Quotes first, then separators: a `;` or `>` inside a quoted argument is not shell syntax.
+    # Each stage of a pipeline is judged alone, so `gated step | python3 -c "..."` reads only.
+    for segment in split_outside_quotes(command, SEGMENT_RE.pattern):
+        for stage in split_outside_quotes(segment, PIPE):
+            if not stage.strip() or is_gated_call(stage):
+                continue
+            rest = SCRATCH_REDIRECT_RE.sub("", stage)
+            if EDIT_HINT_RE.search(unquoted(rest)) and not scratch_files_only(rest):
+                return True
     return False
 
 

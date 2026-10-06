@@ -171,6 +171,70 @@ class PreToolTest(GatedCase):
         self.assertTrue(edits_files("echo x > /tmp/$(cp a src/b)"))
         self.assertTrue(edits_files("echo x > /tmpfoo/a"))
 
+    def test_separators_inside_quotes_do_not_split_the_command(self):
+        # Live run 2026-10-06: python code piped from `gated step` holds `;` and a newline, which
+        # cut the quoted string in half, so its `j>0` counted as a redirect.
+        from gated_lib.hooks import edits_files
+        self.assertFalse(edits_files(
+            'python3 "/Users/x/.claude/plugins/cache/gated/gated/0.7.0/skills/gated/bin/gated" step | python3 -c "\n'
+            "import sys;t=sys.stdin.read();i=t.find('Nothing is narrowed. Ledger row 37');"
+            "j=t.find('. ',t.find('instead of an unrecorded brief'))\n"
+            "print(t[:300]);print('...[planning history omitted]...');print(t[j+2:] if j>0 else t)\""))
+        self.assertFalse(edits_files("""python3 -c 'a=1; print(a > 0)' && echo "x; y > z" || true"""))
+        self.assertFalse(edits_files('echo "a && b > c\nd"'))
+        # A redirect outside the quotes is still an edit, wherever the quotes sit.
+        self.assertTrue(edits_files('python3 -c "import sys; print(1)" > out.md'))
+        self.assertTrue(edits_files("""echo 'a; b' && echo x > src/a.ts"""))
+        # An unclosed quote hides nothing: the rest is read as plain text.
+        self.assertTrue(edits_files("""echo "a; echo x > src/a.ts"""))
+        self.assertTrue(edits_files("""echo \\' ; echo x > src/a.ts ; echo \\'"""))
+        # An escaped quote opens nothing either.
+        self.assertTrue(edits_files("""echo \\' x > src/a.ts \\'"""))
+        self.assertFalse(edits_files("""echo a \\> b"""))
+
+    def test_pipe_from_gated_into_a_reader_is_not_an_edit(self):
+        from gated_lib.hooks import edits_files
+        self.assertFalse(edits_files('python3 bin/gated step | python3 -c "import sys; print(sys.stdin.read()[:9])"'))
+        self.assertFalse(edits_files("gated status | jq '.checkpoints[] | select(.n > 1)'"))
+        self.assertFalse(edits_files("gated step | sed -n '1,40p'"))
+        self.assertFalse(edits_files("gated step | head -50; gated check | tail -5"))
+        # Each stage is judged on its own: a write after the pipe is still an edit.
+        self.assertTrue(edits_files("gated step | tee brief.md"))
+        self.assertTrue(edits_files("gated step | sed -i s/a/b/ f.md"))
+        self.assertTrue(edits_files("gated step | python3 -c 'print(1)' > out.md"))
+
+    def test_removing_or_copying_scratch_files_is_not_an_edit(self):
+        # Live run 2026-10-06: `rm -f /tmp/cp1.txt && gated step` failed fresh-context.
+        from gated_lib.hooks import edits_files
+        self.assertFalse(edits_files('rm -f /tmp/cp1.txt && python3 "/x/bin/gated" step'))
+        self.assertFalse(edits_files("rm -rf /private/tmp/a /tmp/b"))
+        self.assertFalse(edits_files('rm "$TMPDIR/brief.md" ${TMPDIR}/x.md'))
+        self.assertFalse(edits_files("mv /tmp/a.md .gated/runs/story-1/brief.md"))
+        self.assertFalse(edits_files("cp -- /tmp/a.md /tmp/b.md 2>/dev/null"))
+        self.assertFalse(edits_files("gated step | tee /tmp/brief.md"))
+        self.assertFalse(edits_files("gated step | tee -a .gated/runs/story-1/brief.md > /dev/null"))
+        # Any path outside the scratch folders makes it an edit.
+        self.assertTrue(edits_files("rm src/x.ts"))
+        self.assertTrue(edits_files("rm -f /tmp/a src/x.ts"))
+        self.assertTrue(edits_files("cp /tmp/a.ts src/a.ts"))
+        self.assertTrue(edits_files("mv src/a.ts /tmp/a.ts"))
+        self.assertTrue(edits_files("tee file"))
+        self.assertTrue(edits_files("tee /tmp/a > src/a.ts"))
+        self.assertTrue(edits_files("rm"))
+        # Paths that leave the folder, or can't be read safely, are edits too.
+        self.assertTrue(edits_files("rm /tmp/../repo/src/a.ts"))
+        self.assertTrue(edits_files("rm .gated/runs/r/../../../src/a.ts"))
+        self.assertTrue(edits_files("rm /tmp/$(cp a src/b)"))
+        self.assertTrue(edits_files("rm /tmpfoo/a"))
+        self.assertTrue(edits_files("rm '/tmp/a' \"/tmp/b"))
+        self.assertTrue(edits_files("rm '$TMPDIR/a'"))
+        self.assertTrue(edits_files("rm /tmp/a > src/a.ts"))
+        # The other edits stay edits.
+        self.assertTrue(edits_files("echo x > file"))
+        self.assertTrue(edits_files("cat a > b.ts"))
+        self.assertTrue(edits_files("git commit -m 'wip'"))
+        self.assertTrue(edits_files("ln -s /tmp/a /tmp/b"))
+
     def test_saved_brief_logs_no_edit(self):
         self.assertEqual(self.pre("Bash", {"command": "python3 bin/gated step > /tmp/brief.md"})[0], 0)
         row = json.loads((self.run.dir / "activity.jsonl").read_text().splitlines()[-1])
@@ -181,6 +245,7 @@ class PreToolTest(GatedCase):
         self.assertEqual(self.pre("Bash", {"command": f"echo x > /tmp/..{self.locked}"})[0], 2)
         self.assertEqual(self.pre("Bash", {"command": f"gated step > {self.run.dir}/state.json"})[0], 2)
         self.assertEqual(self.pre("Bash", {"command": f"gated step > {self.run.dir}/brief.md"})[0], 0)
+        self.assertEqual(self.pre("Bash", {"command": f"rm -f {self.run.dir}/state.json"})[0], 2)
 
     def test_shell_writes_to_locked_file(self):
         self.assertEqual(self.pre("Bash", {"command": f"echo x > {self.locked}"})[0], 2)
