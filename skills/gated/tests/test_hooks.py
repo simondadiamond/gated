@@ -171,6 +171,38 @@ class PreToolTest(GatedCase):
         self.assertTrue(edits_files("echo x > /tmp/$(cp a src/b)"))
         self.assertTrue(edits_files("echo x > /tmpfoo/a"))
 
+    def test_separators_inside_quotes_do_not_split_the_command(self):
+        # Live run 2026-10-06: python code piped from `gated step` holds `;` and a newline, which
+        # cut the quoted string in half, so its `j>0` counted as a redirect.
+        from gated_lib.hooks import edits_files
+        self.assertFalse(edits_files(
+            'python3 "/Users/x/.claude/plugins/cache/gated/gated/0.7.0/skills/gated/bin/gated" step | python3 -c "\n'
+            "import sys;t=sys.stdin.read();i=t.find('Nothing is narrowed. Ledger row 37');"
+            "j=t.find('. ',t.find('instead of an unrecorded brief'))\n"
+            "print(t[:300]);print('...[planning history omitted]...');print(t[j+2:] if j>0 else t)\""))
+        self.assertFalse(edits_files("""python3 -c 'a=1; print(a > 0)' && echo "x; y > z" || true"""))
+        self.assertFalse(edits_files('echo "a && b > c\nd"'))
+        # A redirect outside the quotes is still an edit, wherever the quotes sit.
+        self.assertTrue(edits_files('python3 -c "import sys; print(1)" > out.md'))
+        self.assertTrue(edits_files("""echo 'a; b' && echo x > src/a.ts"""))
+        # An unclosed quote hides nothing: the rest is read as plain text.
+        self.assertTrue(edits_files("""echo "a; echo x > src/a.ts"""))
+        self.assertTrue(edits_files("""echo \\' ; echo x > src/a.ts ; echo \\'"""))
+        # An escaped quote opens nothing either.
+        self.assertTrue(edits_files("""echo \\' x > src/a.ts \\'"""))
+        self.assertFalse(edits_files("""echo a \\> b"""))
+
+    def test_pipe_from_gated_into_a_reader_is_not_an_edit(self):
+        from gated_lib.hooks import edits_files
+        self.assertFalse(edits_files('python3 bin/gated step | python3 -c "import sys; print(sys.stdin.read()[:9])"'))
+        self.assertFalse(edits_files("gated status | jq '.checkpoints[] | select(.n > 1)'"))
+        self.assertFalse(edits_files("gated step | sed -n '1,40p'"))
+        self.assertFalse(edits_files("gated step | head -50; gated check | tail -5"))
+        # Each stage is judged on its own: a write after the pipe is still an edit.
+        self.assertTrue(edits_files("gated step | tee brief.md"))
+        self.assertTrue(edits_files("gated step | sed -i s/a/b/ f.md"))
+        self.assertTrue(edits_files("gated step | python3 -c 'print(1)' > out.md"))
+
     def test_saved_brief_logs_no_edit(self):
         self.assertEqual(self.pre("Bash", {"command": "python3 bin/gated step > /tmp/brief.md"})[0], 0)
         row = json.loads((self.run.dir / "activity.jsonl").read_text().splitlines()[-1])
