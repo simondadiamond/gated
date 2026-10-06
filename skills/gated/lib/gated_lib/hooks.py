@@ -95,6 +95,35 @@ _SCRATCH_PATH = r"(?:(?:/(?:private/)?tmp|\$\{?TMPDIR\}?)/|(?:" + _PATH_CHAR + r
 SCRATCH_REDIRECT_RE = re.compile(r"\d*>>?\s*(?:\"" + _SCRATCH_PATH + r"\"|" + _SCRATCH_PATH + r"(?=[\s;&|)]|$))")
 
 
+SCRATCH_PATH_RE = re.compile(_SCRATCH_PATH)
+# Deleting, moving or copying scratch files is the same as redirecting into them.
+SCRATCH_FILE_COMMANDS = {"rm", "mv", "cp", "tee"}
+# One shell word, quotes kept. A lone unclosed quote stays in the word, so that path matches nothing.
+SHELL_WORD_RE = re.compile(r"(?:" + QUOTED_RE.pattern + r"|[^\s'\"\\]|['\"\\])+", re.S)
+REDIRECT_WORD_RE = re.compile(r"\d*>>?(&\d+|/dev/null)?")
+
+
+def scratch_files_only(stage: str) -> bool:
+    """rm, mv, cp or tee whose every path is in a temp folder or the run folder, bare or double-quoted.
+    A path with `..`, `$(`, single quotes or an unclosed quote doesn't count, the same as for redirects."""
+    if ">" in unquoted(stage):
+        return False
+    words = SHELL_WORD_RE.findall(stage)
+    if not words or words[0] not in SCRATCH_FILE_COMMANDS:
+        return False
+    paths: List[str] = []
+    options, skip = True, False
+    for word in words[1:]:
+        redirect = REDIRECT_WORD_RE.fullmatch(word)
+        if skip or redirect:  # the check above left only /dev/null and fd dups; a bare '>' takes the next word
+            skip = bool(redirect) and redirect.group(1) is None
+        elif options and word == "--":
+            options = False
+        elif not (options and word.startswith("-")):
+            paths.append(word[1:-1] if len(word) > 1 and word[0] == word[-1] == '"' else word)
+    return bool(paths) and all(SCRATCH_PATH_RE.fullmatch(p) for p in paths)
+
+
 def edits_files(command: str) -> bool:
     # Quotes first, then separators: a `;` or `>` inside a quoted argument is not shell syntax.
     # Each stage of a pipeline is judged alone, so `gated step | python3 -c "..."` reads only.
@@ -103,7 +132,7 @@ def edits_files(command: str) -> bool:
             if not stage.strip() or is_gated_call(stage):
                 continue
             rest = SCRATCH_REDIRECT_RE.sub("", stage)
-            if EDIT_HINT_RE.search(unquoted(rest)):
+            if EDIT_HINT_RE.search(unquoted(rest)) and not scratch_files_only(rest):
                 return True
     return False
 
