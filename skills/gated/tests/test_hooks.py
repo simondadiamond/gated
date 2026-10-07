@@ -221,6 +221,9 @@ class PreToolTest(GatedCase):
         # A heredoc fed to a shell is commands, so its body is still read.
         self.assertTrue(edits_files("bash <<'EOF'\nrm src/a.ts\nEOF"))
         self.assertTrue(edits_files("ssh box sh -s <<EOF\nmv a b\nEOF"))
+        self.assertTrue(edits_files("cat <<'EOF' | bash\nrm src/a.ts\nEOF"))
+        # A shift in arithmetic is not a heredoc, so the next line is still a command.
+        self.assertTrue(edits_files("x=$((1<<4))\nrm src/a.ts"))
         # What follows the end marker is a command again.
         self.assertTrue(edits_files("cat > /tmp/a.md <<'EOF'\ntext\nEOF\ncp /tmp/a.md src/a.md"))
         # A body never closed runs to the end, like the shell reads it.

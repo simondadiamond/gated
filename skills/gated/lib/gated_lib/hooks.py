@@ -126,8 +126,10 @@ def scratch_files_only(stage: str) -> bool:
 
 # A heredoc's body is text the command reads, not shell. `<<<` is a here-string, not a heredoc.
 HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([\w.-]+))")
-HEREDOC_SCAN_RE = re.compile(QUOTED_RE.pattern + "|" + HEREDOC_RE.pattern)
-# Fed to a shell, the body is commands after all, so it stays.
+# `$((1<<4))` is a shift, so arithmetic is skipped like a quoted string.
+HEREDOC_SCAN_RE = re.compile(QUOTED_RE.pattern + r"|\$\(\([^\n]*?\)\)|" + HEREDOC_RE.pattern)
+# Fed to a shell, the body is commands after all, so it stays. Any shell word on the heredoc's line
+# counts, so `cat <<EOF | bash` keeps its body too.
 SHELL_WORDS = {"sh", "bash", "zsh", "dash", "ksh"}
 
 
@@ -143,8 +145,7 @@ def without_heredoc_bodies(command: str) -> str:
             marker = m.group(2) or m.group(3) or m.group(4)
             if not marker:
                 continue  # a quoted string: a '<<' inside it is an argument
-            stage = re.split(r"[;&|(]", line[:m.start()])[-1].split()
-            to_shell = any(Path(w).name in SHELL_WORDS for w in stage)
+            to_shell = any(Path(w).name in SHELL_WORDS for w in re.split(r"[\s;&|()]+", line))
             while i < len(lines):
                 body = lines[i]
                 i += 1
