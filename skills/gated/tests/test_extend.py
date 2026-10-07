@@ -237,6 +237,42 @@ class QuestionTest(GatedCase):
         self.assertEqual(len(run.state["answers"]), 3)
         self.assertIn("use main, I moved it", self.gated("report")[1])
 
+    def test_dialog_answers_a_question_in_the_same_turn(self):
+        # Seen live (2026-10-07): the agent asked through AskUserQuestion, the person chose, and the
+        # next Stop still paused the run on question.md until they typed the same answer again.
+        self.failing_run()
+        self.gated("ask", "Which base branch should the diff use?")
+        code, out, _ = self.hook("dialog", {"session_id": "owner", "tool_name": "AskUserQuestion",
+                                             "tool_response": {"answers": {"Base branch?": "main"}}})
+        self.assertEqual(code, 0)
+        self.assertIn("recorded the answer from the question dialog", out)
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.state["answers"][-1]["answer"], "Base branch?: main")
+        self.assertEqual(run.state["answers"][-1]["from"], "dialog")
+        self.assertFalse((run.dir / "question.md").exists())
+        self.hook("stop", {"session_id": "owner"})
+        self.assertNotEqual(self.run_obj().status, "waiting", "an answered question must not pause the run")
+
+    def test_dialog_answers_a_question_the_stop_already_paused_on(self):
+        self.failing_run()
+        self.gated("ask", "ok?")
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "waiting")
+        code, out, _ = self.hook("dialog", {"session_id": "owner", "tool_name": "AskUserQuestion",
+                                             "tool_response": {"answers": {"ok?": "Yes, go"}}})
+        self.assertIn("recorded your answer", out)
+        self.assertEqual(self.run_obj().status, "running")
+
+    def test_dialog_never_approves_and_is_ignored_with_no_question(self):
+        self.failing_run()
+        before = json.dumps(self.run_obj().state, sort_keys=True)
+        code, out, _ = self.hook("dialog", {"session_id": "owner", "tool_name": "AskUserQuestion",
+                                             "tool_response": {"answers": {"Ship it?": "approve"}}})
+        self.assertEqual(code, 0)
+        self.assertEqual(json.dumps(self.run_obj().state, sort_keys=True), before)
+        self.assertEqual(self.run_obj().state.get("approvals", []), [])
+
     def test_gates_still_bind_after_the_answer(self):
         self.failing_run()
         self.gated("ask", "ok?")

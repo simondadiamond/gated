@@ -334,6 +334,9 @@ class InstallTest(GatedCase):
         from helpers import ROOT
         data = json.loads((ROOT.parents[1] / "hooks" / "hooks.json").read_text())
         for event, matcher, kind, _ in install.EVENTS["claude"]:
-            entry = data["hooks"][event][0]
-            self.assertEqual(entry.get("matcher", ""), matcher)
-            self.assertTrue(entry["hooks"][0]["command"].endswith(f"hook {kind}"))
+            # an event may carry several entries (PostToolUse: Bash and AskUserQuestion)
+            entries = [e for e in data["hooks"][event] if e.get("matcher", "") == matcher]
+            self.assertEqual(len(entries), 1, f"{event}/{matcher!r} must appear exactly once in hooks.json")
+            self.assertTrue(entries[0]["hooks"][0]["command"].endswith(f"hook {kind}"))
+        plugin_count = sum(len(v) for v in data["hooks"].values())
+        self.assertEqual(plugin_count, len(install.EVENTS["claude"]), "hooks.json has an entry the installer lacks")
