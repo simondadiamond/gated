@@ -124,9 +124,41 @@ def scratch_files_only(stage: str) -> bool:
     return bool(paths) and all(SCRATCH_PATH_RE.fullmatch(p) for p in paths)
 
 
+# A heredoc's body is text the command reads, not shell. `<<<` is a here-string, not a heredoc.
+HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([\w.-]+))")
+HEREDOC_SCAN_RE = re.compile(QUOTED_RE.pattern + "|" + HEREDOC_RE.pattern)
+# Fed to a shell, the body is commands after all, so it stays.
+SHELL_WORDS = {"sh", "bash", "zsh", "dash", "ksh"}
+
+
+def without_heredoc_bodies(command: str) -> str:
+    """The command with each heredoc's body and end marker taken out, unless a shell reads it.
+    A body never closed runs to the end of the command, as the shell reads it."""
+    lines, out, i = command.split("\n"), [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        for m in HEREDOC_SCAN_RE.finditer(line):
+            marker = m.group(2) or m.group(3) or m.group(4)
+            if not marker:
+                continue  # a quoted string: a '<<' inside it is an argument
+            stage = re.split(r"[;&|(]", line[:m.start()])[-1].split()
+            to_shell = any(Path(w).name in SHELL_WORDS for w in stage)
+            while i < len(lines):
+                body = lines[i]
+                i += 1
+                if to_shell:
+                    out.append(body)
+                if (body.lstrip("\t") if m.group(1) else body) == marker:
+                    break
+    return "\n".join(out)
+
+
 def edits_files(command: str) -> bool:
     # Quotes first, then separators: a `;` or `>` inside a quoted argument is not shell syntax.
     # Each stage of a pipeline is judged alone, so `gated step | python3 -c "..."` reads only.
+    command = without_heredoc_bodies(command)
     for segment in split_outside_quotes(command, SEGMENT_RE.pattern):
         for stage in split_outside_quotes(segment, PIPE):
             if not stage.strip() or is_gated_call(stage):
