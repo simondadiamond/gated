@@ -116,7 +116,8 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
    to them exactly as it's written, then end your turn. They answer by typing
    `approve` as the whole message, and a hook records it. Anything else they
    say is feedback: have a subagent act on it, then `gated check`. They can
-   also type `cancel run` to end the run.
+   also type `cancel run` to end the run. An approval is never taken from a
+   question dialog: only the typed word counts.
 5. **Finishing.** When the run is `done`, show `gated report` in a few lines
    and ask the person to try the result. Where the report and what a
    subagent told you disagree, check the files and say which is true.
@@ -201,14 +202,19 @@ every finished run (done, or cancelled after real work):
 - `gated check` from your shell is advisory. Nothing you set in your shell
   (variables, `PATH`, a judge override) can pass a gate.
 - Need the person mid-run, for something only they can decide? Run
-  `gated ask "<question>"`, put the question to them, and end your turn. The
-  run waits without spending an attempt, and their next message answers it.
-  Don't end your turn to wait any other way: every other stop reruns the gates
-  and counts.
+  `gated ask "<question>"`, then ask it with your question tool
+  (AskUserQuestion in Claude Code) when you have one: the whole question in the
+  dialog, with the context it needs and one option per answer, recommended
+  first. The hook records their choice as the answer and the run carries on in
+  the same turn. Without a question tool, put the question to them in text and
+  end your turn: the run waits without spending an attempt, and their next
+  message answers it. Don't end your turn to wait any other way: every other
+  stop reruns the gates and counts.
 - A judge can stop the run with a decision only the person can make (the stop
   hook says "A judge needs a decision"). Put the question to them exactly as
-  written and end your turn. Their reply is recorded as the answer, and the
-  judge sees it on the next stop. Don't answer it yourself.
+  written, through the question tool when you have one, otherwise in text, and
+  end your turn. Their reply is recorded as the answer, and the judge sees it
+  on the next stop. Don't answer it yourself.
 - Keep the person's interruptions to one decision each.
 
 ### Scheduled and headless runs

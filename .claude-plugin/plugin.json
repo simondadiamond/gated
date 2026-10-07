@@ -1,6 +1,6 @@
 {
   "name": "gated",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Run a workflow as checkpoints whose gates are checked by code, not by the agent. Works in Claude Code and Codex.",
   "author": {
     "name": "Simon Paris",

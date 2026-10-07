@@ -23,6 +23,7 @@ EVENTS: Dict[str, List[Tuple[str, str, str, int]]] = {
         ("Stop", "", "stop", 3600),
         ("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit|Bash|Skill", "pretool", 30),
         ("PostToolUse", "Bash", "posttool", 30),
+        ("PostToolUse", "AskUserQuestion", "dialog", 30),
         ("UserPromptSubmit", "", "prompt", 600),
     ],
     "codex": [

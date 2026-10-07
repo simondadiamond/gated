@@ -352,7 +352,38 @@ def prompt(payload: Dict[str, Any]) -> Decision:
         return Decision(stdout=runner.approve(run, text))
 
 
-HANDLERS = {"stop": stop, "pretool": pretool, "posttool": posttool, "prompt": prompt}
+def dialog_text(response: Any) -> str:
+    """The question tool's result: {"answers": {question: choice}} in Claude Code; anything else
+    is taken as text."""
+    if isinstance(response, dict):
+        answers = response.get("answers")
+        if isinstance(answers, dict) and answers:
+            return "; ".join(f"{q}: {a}" for q, a in answers.items())
+        return json.dumps(response)
+    return str(response or "")
+
+
+def dialog(payload: Dict[str, Any]) -> Decision:
+    """PostToolUse on the question tool. The person's choice in the dialog is their answer to an
+    open question, exactly like a typed reply (the harness wrote it, not the agent). Approvals are
+    not taken from a dialog: those stay a typed `approve`."""
+    target = session_run_dir(payload.get("session_id"))
+    if target is None:
+        return Decision()
+    text = dialog_text(payload.get("tool_response"))
+    if not text.strip():
+        return Decision()
+    with locked(target) as run:
+        if run.state.get("owner") != payload.get("session_id") or run.status in FINISHED_STATUSES:
+            return Decision()
+        if run.state.get("question"):  # the Stop hook already paused the run on it
+            return Decision(stdout=runner.answer(run, text))
+        if run.status in ("running", "planning"):  # asked and answered within one turn
+            return Decision(stdout=runner.answer_pending(run, text))
+    return Decision()
+
+
+HANDLERS = {"stop": stop, "pretool": pretool, "posttool": posttool, "prompt": prompt, "dialog": dialog}
 
 
 def main(kind: str) -> int:

@@ -591,6 +591,22 @@ def take_question(run: Run) -> str:
     return text
 
 
+def answer_pending(run: Run, text: str) -> str:
+    """A question tool (AskUserQuestion) answered the question the agent saved with `gated ask`
+    inside the same turn, before any Stop. Record it and drop the pause that Stop would have
+    started: the person has already spoken."""
+    path = question_path(run)
+    question = path.read_text().strip() if path.is_file() else ""
+    if not question:
+        return ""
+    n = 1 + len(run.state.get("answers", []))
+    path.rename(run.dir / f"question-{n}.md")
+    run.state.setdefault("answers", []).append({"question": question[:2000], "answer": text.strip()[:2000],
+                                                "at": now(), "from": "dialog"})
+    run.save()
+    return "gated: recorded the answer from the question dialog. The run continues; its gates still have to pass."
+
+
 def answer(run: Run, text: str) -> str:
     q = run.state.pop("question")
     run.state.setdefault("answers", []).append({"question": q["text"], "answer": text.strip()[:2000], "at": now(),
