@@ -203,6 +203,35 @@ class PreToolTest(GatedCase):
         self.assertTrue(edits_files("gated step | sed -i s/a/b/ f.md"))
         self.assertTrue(edits_files("gated step | python3 -c 'print(1)' > out.md"))
 
+    def test_heredoc_body_is_text_not_commands(self):
+        # Live run 2026-10-07: a person's answer quoted into /tmp with a heredoc failed the plan. Its
+        # lines start with '> ' and one says "no new install warning", which read as edits.
+        from gated_lib.hooks import edits_files
+        live = ("cat > /tmp/c2710.md <<'EOF'\nDecision on AC-8, quoted:\n\n> AC-8: two cases.\n"
+                "> (2) Vous n'êtes pas connecté, so Chrome shows no new install warning.\nEOF\n"
+                "gh issue comment 2710 --body-file /tmp/c2710.md")
+        self.assertFalse(edits_files(live))
+        self.assertFalse(edits_files("cat <<EOF > /tmp/a.md\nrm -rf src && git commit -m x\nEOF"))
+        self.assertFalse(edits_files('cat > "$TMPDIR/a.md" <<"END"\ncp a b\nEND'))
+        self.assertFalse(edits_files("cat > /tmp/a.md <<-EOF\n\t> quoted\n\tEOF\ngated status"))
+        self.assertFalse(edits_files("python3 - <<'PY'\nprint(1 > 0)\nPY"))
+        # A heredoc's target outside the scratch folders is still an edit.
+        self.assertTrue(edits_files("cat > src/a.ts <<'EOF'\nexport {}\nEOF"))
+        self.assertTrue(edits_files("cat <<EOF > src/a.ts\nx\nEOF"))
+        # A heredoc fed to a shell is commands, so its body is still read.
+        self.assertTrue(edits_files("bash <<'EOF'\nrm src/a.ts\nEOF"))
+        self.assertTrue(edits_files("ssh box sh -s <<EOF\nmv a b\nEOF"))
+        self.assertTrue(edits_files("cat <<'EOF' | bash\nrm src/a.ts\nEOF"))
+        # A shift in arithmetic is not a heredoc, so the next line is still a command.
+        self.assertTrue(edits_files("x=$((1<<4))\nrm src/a.ts"))
+        # What follows the end marker is a command again.
+        self.assertTrue(edits_files("cat > /tmp/a.md <<'EOF'\ntext\nEOF\ncp /tmp/a.md src/a.md"))
+        # A body never closed runs to the end, like the shell reads it.
+        self.assertFalse(edits_files("cat > /tmp/a.md <<EOF\nrm x"))
+        # '<<' inside quotes and a here-string are not heredocs.
+        self.assertTrue(edits_files("echo 'a << EOF'\nrm src/a.ts\nEOF"))
+        self.assertTrue(edits_files("grep x <<< EOF\nrm src/a.ts\nEOF"))
+
     def test_removing_or_copying_scratch_files_is_not_an_edit(self):
         # Live run 2026-10-06: `rm -f /tmp/cp1.txt && gated step` failed fresh-context.
         from gated_lib.hooks import edits_files
