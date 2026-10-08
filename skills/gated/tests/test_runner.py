@@ -842,6 +842,36 @@ class FreshContextTest(GatedCase):
         code, _, err = self.hook("stop", {"session_id": "owner"})
         self.assertIn("orchestrator changed files itself", err)
 
+    def test_orchestrator_writing_git_ignored_files_does_not_count(self):
+        # Live run 2026-10-06 (#2633): `rm -rf .next/dev/types && pnpm exec next typegen` at prove
+        # failed fresh-context for good, though .next/ is a git-ignored build cache.
+        self.git_init()
+        (self.project / ".gitignore").write_text("/.next/\n")
+        (self.project / "tracked.gen").write_text("x")
+        subprocess.run(["git", "add", "-f", ".gitignore", "tracked.gen"], cwd=str(self.project), check=True, capture_output=True)
+        run = self.two_checkpoints()
+        self.todos_done(run, "one")
+        for call in ({"tool_name": "Bash", "tool_input": {"command": "rm -rf .next/dev/types && pnpm exec next typegen"}},
+                     {"tool_name": "Bash", "tool_input": {"command": f"rm -f {self.project}/.next/dev/types/validator.ts"}},
+                     {"tool_name": "Write", "tool_input": {"file_path": str(self.project / ".next/dev/types/validator.ts")}}):
+            self.hook("pretool", {"session_id": "owner", "cwd": str(self.project), **call})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("Start checkpoint 'two'", err)
+        # A tracked or unignored path, one outside the project, or one mixed with source still counts.
+        from gated_lib.hooks import edits_files, ignored_by_git
+        ignored = ignored_by_git(self.project, self.project)
+        self.assertTrue(edits_files("rm .next/x src/a.ts", ignored))
+        self.assertTrue(edits_files("rm src/a.ts", ignored))
+        self.assertTrue(edits_files("rm .next/../src/a.ts", ignored))
+        self.assertTrue(edits_files(f"rm {self.tmp}/home/.next/x", ignored))
+        self.assertFalse(ignored("tracked.gen"))
+        self.assertTrue(ignored(".next/x"))
+        self.todos_done(run, "two")
+        self.hook("pretool", {"session_id": "owner", "cwd": str(self.project), "tool_name": "Write",
+                              "tool_input": {"file_path": str(self.project / "app.py")}})
+        code, _, err = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("orchestrator changed files itself", err)
+
     def test_plan_needs_a_planning_subagent(self):
         self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
         run = self.start("story", session="owner")

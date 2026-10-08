@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from . import runner
 from .core import (FINISHED_STATUSES, SKILL_DIR, Run, is_protected, locked, now, owned_run, record_owner,
@@ -103,9 +104,10 @@ SHELL_WORD_RE = re.compile(r"(?:" + QUOTED_RE.pattern + r"|[^\s'\"\\]|['\"\\])+"
 REDIRECT_WORD_RE = re.compile(r"\d*>>?(&\d+|/dev/null)?")
 
 
-def scratch_files_only(stage: str) -> bool:
-    """rm, mv, cp or tee whose every path is in a temp folder or the run folder, bare or double-quoted.
-    A path with `..`, `$(`, single quotes or an unclosed quote doesn't count, the same as for redirects."""
+def scratch_files_only(stage: str, ignored: Optional[Callable[[str], bool]] = None) -> bool:
+    """rm, mv, cp or tee whose every path is in a temp folder, the run folder or (with `ignored`) a
+    git-ignored path, bare or double-quoted. A path with `..`, `$(`, single quotes or an unclosed
+    quote doesn't count, the same as for redirects."""
     if ">" in unquoted(stage):
         return False
     words = SHELL_WORD_RE.findall(stage)
@@ -121,7 +123,7 @@ def scratch_files_only(stage: str) -> bool:
             options = False
         elif not (options and word.startswith("-")):
             paths.append(word[1:-1] if len(word) > 1 and word[0] == word[-1] == '"' else word)
-    return bool(paths) and all(SCRATCH_PATH_RE.fullmatch(p) for p in paths)
+    return bool(paths) and all(SCRATCH_PATH_RE.fullmatch(p) or (ignored is not None and ignored(p)) for p in paths)
 
 
 # A heredoc's body is text the command reads, not shell. `<<<` is a here-string, not a heredoc.
@@ -156,7 +158,30 @@ def without_heredoc_bodies(command: str) -> str:
     return "\n".join(out)
 
 
-def edits_files(command: str) -> bool:
+def ignored_by_git(project: Path, cwd: Path) -> Callable[[str], bool]:
+    """Is this path one git ignores in the project (a build cache like .next/, never source)?
+    Only a plain path inside the project counts; anything git can't answer for is not ignored."""
+    root = project.resolve()
+    plain = re.compile(_PATH_CHAR + "+")
+
+    def check(raw: str) -> bool:
+        if not plain.fullmatch(raw):
+            return False
+        p = Path(raw).expanduser()
+        p = (p if p.is_absolute() else cwd / p).resolve()
+        if p == root or root not in p.parents:
+            return False
+        try:  # tracked files are never reported as ignored, so a tracked file still counts
+            done = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", "--", str(p)],
+                                  capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return done.returncode == 0
+
+    return check
+
+
+def edits_files(command: str, ignored: Optional[Callable[[str], bool]] = None) -> bool:
     # Quotes first, then separators: a `;` or `>` inside a quoted argument is not shell syntax.
     # Each stage of a pipeline is judged alone, so `gated step | python3 -c "..."` reads only.
     command = without_heredoc_bodies(command)
@@ -165,7 +190,7 @@ def edits_files(command: str) -> bool:
             if not stage.strip() or is_gated_call(stage):
                 continue
             rest = SCRATCH_REDIRECT_RE.sub("", stage)
-            if EDIT_HINT_RE.search(unquoted(rest)) and not scratch_files_only(rest):
+            if EDIT_HINT_RE.search(unquoted(rest)) and not scratch_files_only(rest, ignored):
                 return True
     return False
 
@@ -238,7 +263,13 @@ def record_activity(run: Run, payload: Dict[str, Any], tool: str, tool_input: Di
     else:
         return
     command = command_text(tool_input) if tool not in EDIT_TOOLS else ""
-    edit = tool in EDIT_TOOLS or tool == "apply_patch" or (bool(command) and edits_files(command))
+    # Writing a git-ignored file (a dev server's .next/ types, say) changes no work under review.
+    ignored = ignored_by_git(Path(run.project), Path(payload.get("cwd") or run.project))
+    target = tool_input.get("file_path") or tool_input.get("notebook_path")
+    if tool in EDIT_TOOLS:
+        edit = not (isinstance(target, str) and ignored(target))
+    else:
+        edit = tool == "apply_patch" or (bool(command) and edits_files(command, ignored))
     what = tool_input.get("skill") if tool == "Skill" else (tool_input.get("file_path") or tool_input.get("notebook_path") or command[:80])
     row = {"phase": phase, "agent": payload.get("agent_id") or "main", "tool": tool, "edit": edit, "what": str(what), "at": now()}
     with open(run.dir / "activity.jsonl", "a") as f:

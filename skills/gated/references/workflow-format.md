@@ -64,7 +64,8 @@ gates automatically:
 - `fresh-context`: a subagent that hasn't worked on any other phase did the
   work, and the orchestrator edited nothing itself. The hooks record every
   tool call with the caller's `agent_id` in `activity.jsonl`, in both Claude
-  Code and Codex. `gated submit-plan` applies the same rule to the planner.
+  Code and Codex. Writing or deleting a git-ignored path (a build cache such
+  as `.next/`) isn't an edit. `gated submit-plan` applies the same rule to the planner.
   Set `"freshContext": false` only for a harness without subagents.
 
 ## Templates
