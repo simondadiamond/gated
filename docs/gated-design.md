@@ -272,7 +272,10 @@ that file. From it:
   worked on the checkpoint, at least one of them never worked on another phase
   (the planner can't build, and the builder of one checkpoint can't build the
   next), and the orchestrator made no edits, including write-looking shell
-  commands. Writes to git-ignored paths (build caches) don't count.
+  commands. Writes to git-ignored paths (build caches) don't count, nor do edit
+  tools writing outside the project (a session scratchpad, seen live 2026-10-09).
+  The run folder is git-ignored too, but writes there always count: the plan
+  lives there.
 
 Fixes inside one checkpoint go to a new foreground subagent with the check's
 output. Continuing the first one with SendMessage runs it in the background in

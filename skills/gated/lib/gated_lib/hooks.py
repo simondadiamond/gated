@@ -257,6 +257,20 @@ def stop(payload: Dict[str, Any]) -> Decision:
     return Decision(2, f"gated: {message}")
 
 
+def edits_work(run: Run, cwd: Path, raw: str, ignored: Callable[[str], bool]) -> bool:
+    """Does an edit tool's write change work the run judges? The run folder holds the plan, so it
+    counts though .gated/ is git-ignored. A file outside the project (a session scratchpad, say,
+    seen live in #2762) or a git-ignored one inside it does not."""
+    p = Path(raw).expanduser()
+    p = (p if p.is_absolute() else cwd / p).resolve()
+    if p == run.dir.resolve() or run.dir.resolve() in p.parents:
+        return True
+    root = Path(run.project).resolve()
+    if p != root and root not in p.parents:
+        return False
+    return not ignored(raw)
+
+
 def record_activity(run: Run, payload: Dict[str, Any], tool: str, tool_input: Dict[str, Any]) -> None:
     """Log who made this call, so the fresh-context gate can check that a new subagent did each phase.
     One appended line per call; the agent can't write this file."""
@@ -268,10 +282,11 @@ def record_activity(run: Run, payload: Dict[str, Any], tool: str, tool_input: Di
         return
     command = command_text(tool_input) if tool not in EDIT_TOOLS else ""
     # Writing a git-ignored file (a dev server's .next/ types, say) changes no work under review.
-    ignored = ignored_by_git(Path(run.project), Path(payload.get("cwd") or run.project))
+    cwd = Path(payload.get("cwd") or run.project)
+    ignored = ignored_by_git(Path(run.project), cwd)
     target = tool_input.get("file_path") or tool_input.get("notebook_path")
     if tool in EDIT_TOOLS:
-        edit = not (isinstance(target, str) and ignored(target))
+        edit = not isinstance(target, str) or edits_work(run, cwd, target, ignored)
     else:
         edit = tool == "apply_patch" or (bool(command) and edits_files(command, ignored))
     what = tool_input.get("skill") if tool == "Skill" else (tool_input.get("file_path") or tool_input.get("notebook_path") or command[:80])
@@ -408,6 +423,11 @@ def dialog_text(response: Any) -> str:
     return str(response or "")
 
 
+def to_agent(message: str) -> Decision:
+    """Claude Code shows a PostToolUse hook's plain stdout to nobody; additionalContext reaches the agent."""
+    return Decision(stdout=json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": message}}))
+
+
 def dialog(payload: Dict[str, Any]) -> Decision:
     """PostToolUse on the question tool. The person's choice in the dialog is their answer to an
     open question, exactly like a typed reply (the harness wrote it, not the agent). Approvals are
@@ -422,10 +442,15 @@ def dialog(payload: Dict[str, Any]) -> Decision:
         if run.state.get("owner") != payload.get("session_id") or run.status in FINISHED_STATUSES:
             return Decision()
         if run.state.get("question"):  # the Stop hook already paused the run on it
-            return Decision(stdout=runner.answer(run, text))
+            return to_agent(runner.answer(run, text))
         if run.status in ("running", "planning"):  # asked and answered within one turn
-            return Decision(stdout=runner.answer_pending(run, text))
-    return Decision()
+            recorded = runner.answer_pending(run, text)
+            if recorded:
+                return to_agent(recorded)
+        # Seen live in #2762: the person answered and nothing said the answer went nowhere.
+        how = ("Approval is the person typing `approve` as their whole message."
+               if run.status == "awaiting-approval" else "Save the question with `gated ask` before you put it to the person.")
+        return to_agent(f"gated: run {run.id} had no open question, so this answer was not recorded. {how}")
 
 
 HANDLERS = {"stop": stop, "pretool": pretool, "posttool": posttool, "prompt": prompt, "dialog": dialog}
