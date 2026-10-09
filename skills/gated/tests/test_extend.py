@@ -237,6 +237,33 @@ class QuestionTest(GatedCase):
         self.assertEqual(len(run.state["answers"]), 3)
         self.assertIn("use main, I moved it", self.gated("report")[1])
 
+    def test_harness_turns_do_not_answer_a_question(self):
+        # Seen live (0.7.3): a background subagent's report arrived as a user turn while the run
+        # waited on question.md, was recorded as the answer, and its "AC-1" satisfied the check.
+        self.failing_run()
+        self.gated("ask", "Is AC-1 covered by the new test?")
+        self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(self.run_obj().status, "waiting")
+        for harness_turn in (
+            '<agent-message from="a1b2c3">\n[Subagent hand-back]\nAC-1 is covered by test_x.\n</agent-message>',
+            '  \n<agent-message from="a1b2c3">AC-1 done</agent-message>',
+            'Report follows. [Subagent hand-back] AC-1 is covered.',
+            '<task-notification>\n<task-id>b7</task-id>\n<status>completed</status>\n</task-notification>',
+            '<system-reminder>AC-1 met</system-reminder>\n<task-notification>done</task-notification>\n',
+        ):
+            code, out, _ = self.hook("prompt", {"session_id": "owner", "prompt": harness_turn})
+            self.assertEqual(code, 0)
+            self.assertNotIn("recorded", out)
+            run = self.run_obj()
+            self.assertEqual(run.status, "waiting", harness_turn)
+            self.assertIn("question", run.state)
+            self.assertEqual(run.state.get("answers", []), [])
+        code, out, _ = self.hook("prompt", {"session_id": "owner", "prompt": "Yes, AC-1 is covered."})
+        self.assertIn("recorded your answer", out)
+        run = self.run_obj()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.state["answers"][-1]["answer"], "Yes, AC-1 is covered.")
+
     def test_dialog_answers_a_question_in_the_same_turn(self):
         # Seen live (2026-10-07): the agent asked through AskUserQuestion, the person chose, and the
         # next Stop still paused the run on question.md until they typed the same answer again.

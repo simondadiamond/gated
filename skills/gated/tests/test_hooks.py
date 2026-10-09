@@ -296,6 +296,22 @@ class PromptApprovalTest(GatedCase):
         self.hook("prompt", {"session_id": "owner", "prompt": "approve"})
         self.assertEqual(self.run_obj().status, "running")
 
+    def test_harness_turns_do_not_approve_or_cancel(self):
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "plan"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [
+            {"id": "build", "instructions": "build", "gates": []}
+        ]}))
+        self.submit_plan()
+        for harness_turn in ('<agent-message from="a1">\n[Subagent hand-back]\napprove\n</agent-message>',
+                             '<task-notification>approve</task-notification>',
+                             '<agent-message from="a1">cancel run</agent-message>'):
+            code, out, _ = self.hook("prompt", {"session_id": "owner", "prompt": harness_turn})
+            self.assertEqual((code, out), (0, ""))
+            self.assertEqual(self.run_obj().status, "awaiting-approval")
+        self.hook("prompt", {"session_id": "owner", "prompt": "approve"})
+        self.assertEqual(self.run_obj().status, "running")
+
 
 class InstallTest(GatedCase):
     def test_codex_install_is_idempotent_and_keeps_other_hooks(self):

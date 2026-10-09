@@ -22,6 +22,10 @@ from .core import (FINISHED_STATUSES, SKILL_DIR, Run, is_protected, locked, now,
 APPROVE_RE = re.compile(r"^\s*(approve|approved|lgtm|ship it)\s*[.!]*\s*$", re.IGNORECASE)
 REJECT_RE = re.compile(r"^\s*reject\b", re.IGNORECASE)
 CANCEL_RE = re.compile(r"^\s*cancel run\s*[.!]*\s*$", re.IGNORECASE)
+# Turns the harness writes into the user slot (a subagent's hand-back, a background task's notice,
+# a system reminder) reach UserPromptSubmit like typed text, and the hook input has no field that
+# marks the turn's origin. They are recognised by their markup; only the rest is the person's.
+HARNESS_BLOCK_RE = re.compile(r"<(task-notification|system-reminder)\b[^>]*>.*?</\1\s*>", re.DOTALL)
 CLAIM_RE = re.compile(r"gated-claim:([0-9a-f]{16})")
 PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$", re.M)
 # Running a script (`python3 checks/x.py`) reads it; only inline code (-c, -e, -i) can write anything.
@@ -364,10 +368,20 @@ def posttool(payload: Dict[str, Any]) -> Decision:
     return Decision()
 
 
+def person_text(prompt_text: str) -> str:
+    """What the person typed, or "" when the turn came from the harness. A subagent's report lands
+    as `<agent-message from=...>` with "[Subagent hand-back]"; seen live (0.7.3), it answered an open
+    question and its mention of "AC-1" then satisfied the criterion check."""
+    stripped = prompt_text.strip()
+    if stripped.startswith("<agent-message") or "[Subagent hand-back]" in stripped:
+        return ""
+    return HARNESS_BLOCK_RE.sub("", stripped).strip()
+
+
 def prompt(payload: Dict[str, Any]) -> Decision:
     target = session_run_dir(payload.get("session_id"))
-    text = payload.get("prompt") or ""
-    if target is None:
+    text = person_text(payload.get("prompt") or "")
+    if target is None or not text:  # not the person: leave any question pending, claim nothing
         return Decision()
     with locked(target) as run:
         if run.state.get("owner") != payload.get("session_id") or run.status in ("done", "cancelled"):
