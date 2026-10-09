@@ -668,6 +668,40 @@ class ReviewFindingsTest(GatedCase):
         self.assertEqual(codes, [2, 2, 0])
         self.assertEqual(self.run_obj().status, "blocked")
 
+    def test_waiting_on_a_planning_subagent_spends_no_attempt(self):
+        # Live run 2026-10-09 (#2762): Claude Code ran the planner in the background, so the
+        # orchestrator ended its turn to wait, and those stops used up all 5 plan attempts.
+        self.workflow("story", {"plan": {"step": "p.md"}, "attempts": 2}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        self.subagent_call(run, "planner")
+        for _ in range(3):
+            code, out, _ = self.hook("stop", {"session_id": "owner"})
+            self.assertEqual(code, 0)
+            self.assertIn("Planning isn't finished", out)
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": []}))
+        code, out, _ = self.hook("stop", {"session_id": "owner"})
+        self.assertEqual(code, 0)
+        self.assertIn("written but not submitted", out)
+        run = self.run_obj()
+        self.assertEqual((run.status, run.state["attempts"].get("plan", 0)), ("planning", 0))
+
+    def test_submit_plan_refuses_while_a_question_is_pending(self):
+        # Live run 2026-10-09 (#2762): the planner saved a question, the orchestrator submitted in the
+        # same turn, the run left planning so the question was never asked, and the plan failed.
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        (run.dir / "question.md").write_text("Is AC-6 right?\n")
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 1)
+        self.assertIn("End your turn", err)
+        self.assertEqual(self.run_obj().status, "planning")
+        code, out, _ = self.hook("stop", {"session_id": "owner"})
+        self.assertIn("Is AC-6 right?", out)
+        self.hook("prompt", {"session_id": "owner", "prompt": "yes"})
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+
     def test_person_can_cancel_and_reject(self):
         self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
         run = self.start("story", session="owner")
@@ -871,6 +905,39 @@ class FreshContextTest(GatedCase):
                               "tool_input": {"file_path": str(self.project / "app.py")}})
         code, _, err = self.hook("stop", {"session_id": "owner"})
         self.assertIn("orchestrator changed files itself", err)
+
+    def test_orchestrator_writing_the_plan_counts_though_runs_are_git_ignored(self):
+        # .gated/ is git-ignored, so the git-ignored exemption (0.7.4) let the orchestrator's own
+        # Write of checkpoints.json through. The run folder is the plan's home: writes there count.
+        self.git_init()
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        self.subagent_call(run, "planner")
+        plan = run.dir / "checkpoints.json"
+        plan.write_text(json.dumps({"checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Write", "tool_input": {"file_path": str(plan)}})
+        code, _, err = self.gated("submit-plan")
+        self.assertEqual(code, 1)
+        self.assertIn("orchestrator changed files itself", err)
+
+    def test_orchestrator_writing_outside_the_project_does_not_count(self):
+        # Live run 2026-10-09 (#2762): a Write to the session scratchpad in /private/tmp made
+        # submit-plan refuse for good, and the finished plan was thrown away with the run.
+        self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        run = self.start("story", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Write",
+                              "tool_input": {"file_path": str(self.tmp / "scratchpad" / "decisions.md")}})
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 0, err)
+        self.workflow("story2", {"plan": {"step": "p.md"}}, {"p.md": "x"})
+        self.hook("prompt", {"session_id": "owner", "prompt": "cancel run"})
+        run = self.start("story2", session="owner")
+        (run.dir / "checkpoints.json").write_text(json.dumps({"checkpoints": [{"id": "a", "instructions": "x", "gates": []}]}))
+        self.hook("pretool", {"session_id": "owner", "tool_name": "Edit", "tool_input": {"file_path": str(self.project / "app.py")}})
+        code, _, err = self.submit_plan()
+        self.assertEqual(code, 1)
+        self.assertIn("cancel run", err, "the refusal names the way out")
 
     def test_plan_needs_a_planning_subagent(self):
         self.workflow("story", {"plan": {"step": "p.md"}}, {"p.md": "x"})

@@ -299,6 +299,18 @@ class QuestionTest(GatedCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.dumps(self.run_obj().state, sort_keys=True), before)
         self.assertEqual(self.run_obj().state.get("approvals", []), [])
+        self.assertIn("not recorded", out, "an answer gated drops is reported, not lost in silence")
+
+    def test_dialog_messages_reach_the_agent(self):
+        # Claude Code shows a PostToolUse hook's plain stdout to nobody; only additionalContext
+        # reaches the agent.
+        self.failing_run()
+        self.gated("ask", "ok?")
+        code, out, _ = self.hook("dialog", {"session_id": "owner", "tool_name": "AskUserQuestion",
+                                             "tool_response": {"answers": {"ok?": "Yes, go"}}})
+        context = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(context["hookEventName"], "PostToolUse")
+        self.assertIn("recorded the answer", context["additionalContext"])
 
     def test_gates_still_bind_after_the_answer(self):
         self.failing_run()

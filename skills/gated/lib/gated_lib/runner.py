@@ -249,7 +249,12 @@ def submit_plan(run: Run, path: Optional[Path] = None) -> str:
         edits = [r for r in plan_rows if r.get("agent") == "main" and r.get("edit")]
         if edits:
             raise GatedError(f"the orchestrator changed files itself while planning (e.g. {edits[0].get('what', '?')}). "
-                             "The planning subagent writes the plan")
+                             "The planning subagent writes the plan. The activity log keeps that edit, so this "
+                             "run can't submit a plan: ask the person to type `cancel run`, then start a new run")
+    if run.status == "planning" and question_path(run).is_file():
+        # Submitting moves the run out of planning, where the Stop hook would never ask this (#2762).
+        raise GatedError("the planner left a question for the person in question.md. End your turn so the run "
+                         "pauses on it, then submit the plan after their answer")
     head = run.state["checkpoints"][: run.state.get("planAt") or 0]
     run.state["checkpoints"] = head
     cps = read_plan(run, path)
@@ -639,6 +644,13 @@ def check(run: Run, count_attempts: bool = False, move: bool = True) -> Tuple[bo
         questions = plan_questions(read_json(path)) if path.is_file() else []
         if questions:
             return True, "The planner has questions. Ask the person:\n" + "\n".join(f"- {q}" for q in questions)
+        waiting = any(r.get("agent") != "main" for r in G.read_activity(run) if r.get("phase") == "plan")
+        if waiting:
+            # A planning subagent has started. The orchestrator may be waiting on it in the background
+            # (Claude Code's default), so a stop is a wait, not a failed attempt (#2762). Only a
+            # rejected plan spends one.
+            done = "The plan is written but not submitted. When the planner is done, run `gated submit-plan`."
+            return True, done if path.is_file() else f"Planning isn't finished. The planner writes the plan to {path}."
         if count_attempts and move:
             n = run.state["attempts"].get("plan", 0) + 1
             run.state["attempts"]["plan"] = n

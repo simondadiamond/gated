@@ -81,7 +81,10 @@ A bare `/gated` is the whole interface for most people. Make it one tap.
    - Run `gated step` and give its whole output to a planning subagent. It
      has to write the plan file, so use one with write tools (in Claude Code,
      not the read-only Plan type).
-   - When the subagent returns, run `gated submit-plan`. If it lists problems,
+   - When the subagent returns, run `gated submit-plan`. If the planner left
+     a question for the person (`question.md` in the run folder), don't
+     submit yet: put the question to them, end your turn, and submit after
+     their answer. If it lists problems,
      give them to a new foreground planning subagent along with the plan's
      path, and submit again.
    - For human approval, show the person the plan summary it prints, and
@@ -195,7 +198,12 @@ every finished run (done, or cancelled after real work):
   run stops as `blocked`. No gate is ever skipped.
 - Run subagents in the foreground, and never end your turn while one is
   still working: the hook checks the files as they are, and a pass on
-  unfinished work moves the run on without checking what lands later.
+  unfinished work moves the run on without checking what lands later. Claude
+  Code's Agent tool runs in the background unless you pass
+  `run_in_background: false`, so pass it on every Agent call in a run. While
+  planning, a stop after the planner has started spends no attempt, so a
+  background planner can be waited out by ending your turn; at a checkpoint
+  it can't.
 - A blocked run isn't a failure to hide. Show the report, say which gate is
   stuck and what it last printed, and suggest the fix. Only the person can
   grant fresh attempts: run `gated resume`, then ask them to type `approve`.

@@ -65,7 +65,8 @@ gates automatically:
   work, and the orchestrator edited nothing itself. The hooks record every
   tool call with the caller's `agent_id` in `activity.jsonl`, in both Claude
   Code and Codex. Writing or deleting a git-ignored path (a build cache such
-  as `.next/`) isn't an edit. `gated submit-plan` applies the same rule to the planner.
+  as `.next/`) isn't an edit, and neither is an edit tool writing outside the
+  project. A write in the run folder always is. `gated submit-plan` applies the same rule to the planner.
   Set `"freshContext": false` only for a harness without subagents.
 
 ## Templates
