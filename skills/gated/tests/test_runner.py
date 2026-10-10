@@ -897,7 +897,7 @@ class FreshContextTest(GatedCase):
         self.assertTrue(edits_files("rm .next/x src/a.ts", ignored))
         self.assertTrue(edits_files("rm src/a.ts", ignored))
         self.assertTrue(edits_files("rm .next/../src/a.ts", ignored))
-        self.assertTrue(edits_files(f"rm {self.tmp}/home/.next/x", ignored))
+        self.assertTrue(edits_files("rm /outside-the-project/home/.next/x", ignored))
         self.assertFalse(ignored("tracked.gen"))
         self.assertTrue(ignored(".next/x"))
         self.todos_done(run, "two")
